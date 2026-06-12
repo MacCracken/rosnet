@@ -1,0 +1,16 @@
+[package]
+name = "rosnet"
+version = "0.1.0"
+description = "rosnet — TODO"
+license = "GPL-3.0-only"
+language = "cyrius"
+cyrius = "6.1.41"
+
+[build]
+entry = "src/main.cyr"
+test = "src/test.cyr"
+output = "rosnet"
+
+[deps]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench"]
+---

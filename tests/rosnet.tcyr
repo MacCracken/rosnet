@@ -1,11 +1,103 @@
-# rosnet test suite
-# Stdlib auto-included via cyrius.cyml
+# rosnet test suite — finite-difference gradient checks + exact BLAS-1 ops.
+#
+# A hand-derived backward is only as trustworthy as its grad-check. linear_bwd
+# is verified against CENTRAL finite differences of linear_fwd — the same check
+# attn11 uses, ported here as rosnet's correctness gate. Stdlib (assert/math)
+# auto-included; rng_seed/rng_normal come from the tyche dep (lib/tyche.cyr
+# appears after `cyrius deps`).
+include "lib/tyche.cyr"
+include "src/tensor.cyr"
+include "src/linear.cyr"
+
+fn _eps(): i64 { return f64_div(f64_from(1), f64_from(10000)); }     # 1e-4
+
+fn dotsum(a, b, n): i64 {
+    var acc = f64_from(0); var i = 0;
+    while (i < n) { acc = f64_add(acc, f64_mul(load64(a + i * 8), load64(b + i * 8))); i = i + 1; }
+    return acc;
+}
+
+# max relative error between analytic and numeric gradient arrays
+fn maxrel(analytic, numeric, n): i64 {
+    var mr = f64_from(0);
+    var tiny = f64_div(f64_from(1), f64_from(1000000000));
+    var i = 0;
+    while (i < n) {
+        var a = load64(analytic + i * 8); var b = load64(numeric + i * 8);
+        var rel = f64_div(f64_abs(f64_sub(a, b)),
+        f64_add(f64_add(f64_abs(a), f64_abs(b)), tiny));
+        if (f64_gt(rel, mr) == 1) { mr = rel; }
+        i = i + 1;
+    }
+    return mr;
+}
+
+# assert max-rel-err < 1/tol_inv
+fn check(name, analytic, numeric, n, tol_inv): i64 {
+    var mr = maxrel(analytic, numeric, n);
+    assert(f64_lt(mr, f64_div(f64_from(1), f64_from(tol_inv))) == 1, name);
+    return 0;
+}
+
+fn lin_loss(x, W, b, y, dy, M, K, N): i64 {
+    linear_fwd(x, W, b, y, M, K, N);
+    return dotsum(dy, y, M * N);
+}
 
 fn main() {
     alloc_init();
-    test_group("smoke");
-    assert(1, "true is true");
-    assert_eq(1 + 1, 2, "math works");
+    rng_seed(1234);
+
+    # ---- BLAS-1: exact, integer-valued so bit-patterns compare directly ----
+    test_group("blas1");
+    var v = t_alloc(4);
+    t_fill(v, 4, f64_from(2));                  # [2,2,2,2]
+    assert(t_sum(v, 4) == f64_from(8), "t_sum after fill");
+    t_scale(v, 4, f64_from(3));                 # [6,6,6,6]
+    assert(t_sum(v, 4) == f64_from(24), "t_scale x3");
+    var w = t_alloc(4);
+    t_fill(w, 4, f64_from(1));
+    t_axpy(v, w, f64_from(2), 4);               # v += 2*w -> [8,8,8,8]
+    assert(t_sum(v, 4) == f64_from(32), "t_axpy a=2");
+    assert(f64_is_finite(f64_from(1)) == 1, "finite ok");
+
+    # ---- linear: analytic backward vs central finite differences ----
+    test_group("linear grad-check");
+    var M = 3; var K = 4; var N = 5;
+    var x = t_alloc(M * K); var W = t_alloc(K * N); var b = t_alloc(N);
+    var y = t_alloc(M * N); var dy = t_alloc(M * N);
+    t_randn(x, M * K, f64_from(1)); t_randn(W, K * N, f64_from(1));
+    t_randn(b, N, f64_from(1)); t_randn(dy, M * N, f64_from(1));
+    var dx = t_alloc(M * K); var dW = t_alloc(K * N); var db = t_alloc(N);
+    linear_fwd(x, W, b, y, M, K, N);
+    linear_bwd(x, W, dy, dx, dW, db, M, K, N);
+
+    var eps = _eps(); var te = f64_mul(f64_from(2), eps);
+    var ndx = t_alloc(M * K); var i = 0;
+    while (i < M * K) {
+        var o = load64(x + i * 8);
+        store64(x + i * 8, f64_add(o, eps)); var lp = lin_loss(x, W, b, y, dy, M, K, N);
+        store64(x + i * 8, f64_sub(o, eps)); var lm = lin_loss(x, W, b, y, dy, M, K, N);
+        store64(x + i * 8, o); store64(ndx + i * 8, f64_div(f64_sub(lp, lm), te)); i = i + 1;
+    }
+    var ndW = t_alloc(K * N); i = 0;
+    while (i < K * N) {
+        var o = load64(W + i * 8);
+        store64(W + i * 8, f64_add(o, eps)); var lp = lin_loss(x, W, b, y, dy, M, K, N);
+        store64(W + i * 8, f64_sub(o, eps)); var lm = lin_loss(x, W, b, y, dy, M, K, N);
+        store64(W + i * 8, o); store64(ndW + i * 8, f64_div(f64_sub(lp, lm), te)); i = i + 1;
+    }
+    var ndb = t_alloc(N); i = 0;
+    while (i < N) {
+        var o = load64(b + i * 8);
+        store64(b + i * 8, f64_add(o, eps)); var lp = lin_loss(x, W, b, y, dy, M, K, N);
+        store64(b + i * 8, f64_sub(o, eps)); var lm = lin_loss(x, W, b, y, dy, M, K, N);
+        store64(b + i * 8, o); store64(ndb + i * 8, f64_div(f64_sub(lp, lm), te)); i = i + 1;
+    }
+    check("linear dx", dx, ndx, M * K, 100000);   # rel err < 1e-5
+    check("linear dW", dW, ndW, K * N, 100000);
+    check("linear db", db, ndb, N, 100000);
+
     return assert_summary();
 }
 

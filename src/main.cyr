@@ -1,9 +1,36 @@
-# rosnet — main entry point
-# Stdlib auto-included via cyrius.cyml
+# rosnet — smoke demo. Random-init a small linear layer (weights via tyche),
+# run the forward matmul, and confirm every output is finite. Library surface is
+# src/tensor.cyr + src/linear.cyr (the [lib] bundle); this main is excluded from
+# dist/rosnet.cyr. lib/tyche.cyr appears after `cyrius deps` resolves the dep.
+include "lib/tyche.cyr"
+include "src/tensor.cyr"
+include "src/linear.cyr"
 
 fn main() {
     alloc_init();
-    println("hello from rosnet");
+    rng_seed(7);
+
+    var M = 2; var K = 3; var N = 4;
+    var x = t_alloc(M * K);
+    var W = t_alloc(K * N);
+    var b = t_alloc(N);
+    var y = t_alloc(M * N);
+
+    t_randn(x, M * K, f64_from(1));
+    t_randn(W, K * N, f64_from(1));
+    t_randn(b, N, f64_from(1));
+
+    linear_fwd(x, W, b, y, M, K, N);
+
+    var ok = 1;
+    var i = 0;
+    while (i < M * N) {
+        if (f64_is_finite(load64(y + i * 8)) == 0) { ok = 0; }
+        i = i + 1;
+    }
+    if (ok == 1) { println("rosnet: linear_fwd 2x3 @ 3x4 + b -> 2x4, all finite  [ok]"); }
+    else { println("rosnet: non-finite output  [FAIL]"); return 1; }
+
     return 0;
 }
 

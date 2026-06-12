@@ -1,16 +1,28 @@
 [package]
 name = "rosnet"
-version = "0.1.0"
-description = "rosnet — TODO"
+version = "${file:VERSION}"
+description = "rosnet — sovereign dense f64 tensor algebra (the BLAS substrate): storage, BLAS-1, matmul + its gradient."
 license = "GPL-3.0-only"
 language = "cyrius"
 cyrius = "6.1.41"
+repository = "https://github.com/MacCracken/rosnet"
 
-[build]
-entry = "src/main.cyr"
-test = "src/test.cyr"
-output = "rosnet"
+# `cyrius distlib` concatenates [lib].modules (in order) into dist/rosnet.cyr —
+# the bundle consumers import via `[deps.rosnet] modules = ["dist/rosnet.cyr"]`.
+# main.cyr is excluded: it carries the smoke main() + SYS_EXIT, not lib surface.
+# NOTE: t_randn (in tensor.cyr) calls tyche's rng_normal — that symbol is left
+# UNRESOLVED in the bundle, so a consumer of rosnet that uses t_randn must also
+# declare [deps.tyche]. Pure tensor/matmul ops need no such transitive dep.
+[lib]
+modules = ["src/tensor.cyr", "src/linear.cyr"]
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench"]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math"]
+
+# Sovereign deterministic statistical PRNG — supplies rng_seed / rng_normal for
+# t_randn (weight init). Pinned to the 0.1.0 release.
+[deps.tyche]
+git = "https://github.com/MacCracken/tyche"
+tag = "0.1.0"
+modules = ["dist/tyche.cyr"]
 ---

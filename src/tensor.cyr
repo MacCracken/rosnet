@@ -1,0 +1,110 @@
+# rosnet — tensor storage + element-wise / BLAS-1 layer.
+#
+# Cyrius has no float type: an f64 is its 64-bit IEEE-754 pattern carried in an
+# i64. A "tensor" here is a heap pointer to a flat, row-major run of f64 values;
+# shapes live in the calling code. Element i sits at byte offset i*8.
+#
+# Stdlib (math/alloc/fmt/io) is auto-included via cyrius.cyml. The PRNG sampler
+# (rng_seed / rng_normal) comes from the tyche dependency — see t_randn.
+
+# Convenience: f64 from a small integer literal.
+fn ff(n): i64 { return f64_from(n); }
+
+# ---- element access --------------------------------------------------------
+# A tensor is a raw pointer; element i is an f64 bit pattern at p + i*8.
+fn tget(p, i): i64 { return load64(p + i * 8); }
+fn tset(p, i, v): i64 { store64(p + i * 8, v); return 0; }
+
+# ---- allocation ------------------------------------------------------------
+# Allocate n f64 elements, zero-initialised (alloc returns zeroed pages, but be
+# explicit so callers can rely on it after reuse). alloc() returns 0 past the
+# allocator's cap — abort cleanly instead of zero-filling from address 0.
+fn t_alloc(n): i64 {
+    var p = alloc(n * 8);
+    if (p == 0) {
+        println("rosnet: t_alloc failed -- out of memory, requested f64s:");
+        fmt_int(n);
+        sys_exit(1);
+    }
+    var i = 0;
+    while (i < n) { store64(p + i * 8, 0); i = i + 1; }
+    return p;
+}
+
+fn t_zero(p, n): i64 {
+    var i = 0;
+    while (i < n) { store64(p + i * 8, 0); i = i + 1; }
+    return 0;
+}
+
+fn t_fill(p, n, v): i64 {
+    var i = 0;
+    while (i < n) { store64(p + i * 8, v); i = i + 1; }
+    return 0;
+}
+
+fn t_copy(dst, src, n): i64 {
+    var i = 0;
+    while (i < n) { store64(dst + i * 8, load64(src + i * 8)); i = i + 1; }
+    return 0;
+}
+
+# ---- BLAS-1 (vector) ops ---------------------------------------------------
+# dst[i] += a * src[i]   (a is an f64 bit pattern)
+fn t_axpy(dst, src, a, n): i64 {
+    var i = 0;
+    while (i < n) {
+        var y = f64_add(load64(dst + i * 8), f64_mul(a, load64(src + i * 8)));
+        store64(dst + i * 8, y);
+        i = i + 1;
+    }
+    return 0;
+}
+
+# dst[i] += src[i]
+fn t_add_into(dst, src, n): i64 {
+    var i = 0;
+    while (i < n) {
+        store64(dst + i * 8, f64_add(load64(dst + i * 8), load64(src + i * 8)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# dst[i] *= s
+fn t_scale(dst, n, s): i64 {
+    var i = 0;
+    while (i < n) {
+        store64(dst + i * 8, f64_mul(load64(dst + i * 8), s));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# sum of all elements (f64 bit pattern)
+fn t_sum(p, n): i64 {
+    var acc = f64_from(0);
+    var i = 0;
+    while (i < n) { acc = f64_add(acc, load64(p + i * 8)); i = i + 1; }
+    return acc;
+}
+
+# ---- robustness guard ------------------------------------------------------
+# 1 if x is a finite f64, 0 if it is NaN or +-Inf. Checked on the bit pattern
+# (exponent all-ones == Inf/NaN), since this toolchain's f64 comparisons are not
+# NaN-correct. Training/sims should stop, not silently corrupt, on a blow-up.
+fn f64_is_finite(x): i64 {
+    if (((x >> 52) & 0x7FF) == 0x7FF) { return 0; }
+    return 1;
+}
+
+# ---- random fill (bridges tyche -> tensor) ---------------------------------
+# Fill p[0..n) with standard-normal samples scaled by std (an f64 bit pattern).
+# rng_normal / rng_seed come from the tyche dependency; seed the stream via
+# tyche's rng_seed before calling for reproducible fills. This is the one
+# rosnet symbol that depends on tyche — consumers using it need [deps.tyche].
+fn t_randn(p, n, std): i64 {
+    var i = 0;
+    while (i < n) { store64(p + i * 8, f64_mul(rng_normal(), std)); i = i + 1; }
+    return 0;
+}

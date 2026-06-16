@@ -5,11 +5,11 @@
 
 ## Version
 
-**0.1.0** — scaffolded 2026-06-11 via `cyrius init`. No releases yet.
+**0.1.1** — scaffolded 2026-06-11 via `cyrius init`.
 
 ## Toolchain
 
-- **Cyrius pin**: `6.1.41` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.2.11` (in `cyrius.cyml [package].cyrius`)
 
 ## Source
 

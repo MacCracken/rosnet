@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "rosnet — sovereign dense f64 tensor algebra (the BLAS substrate): storage, BLAS-1, matmul + its gradient."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.1.41"
+cyrius = "6.2.11"
 repository = "https://github.com/MacCracken/rosnet"
 
 # `cyrius distlib` concatenates [lib].modules (in order) into dist/rosnet.cyr —
@@ -20,9 +20,9 @@ modules = ["src/tensor.cyr", "src/linear.cyr"]
 stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math"]
 
 # Sovereign deterministic statistical PRNG — supplies rng_seed / rng_normal for
-# t_randn (weight init). Pinned to the 0.1.0 release.
+# t_randn (weight init). Pinned to the 0.1.1 release.
 [deps.tyche]
 git = "https://github.com/MacCracken/tyche"
-tag = "0.1.0"
+tag = "0.1.1"
 modules = ["dist/tyche.cyr"]
 ---

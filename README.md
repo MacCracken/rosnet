@@ -36,7 +36,7 @@ tyche — the pure tensor/matmul ops do not. In the `dist/rosnet.cyr` bundle
 ```toml
 [deps.tyche]
 git = "https://github.com/MacCracken/tyche"
-tag = "0.1.0"
+tag = "0.1.1"
 modules = ["dist/tyche.cyr"]
 ```
 
@@ -48,7 +48,7 @@ fills. (tyche is a *statistical* PRNG — never use it for crypto; that's sigil.
 ```toml
 [deps.rosnet]
 git = "https://github.com/MacCracken/rosnet"
-tag = "0.1.0"
+tag = "0.1.1"
 modules = ["dist/rosnet.cyr"]
 ```
 

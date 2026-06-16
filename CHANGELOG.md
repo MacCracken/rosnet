@@ -4,6 +4,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.1.1]
+
+### Changed
+- Bumped Cyrius toolchain pin to `6.2.11` (`cyrius.cyml [package].cyrius`).
+- Bumped `tyche` dependency to `0.1.1`.
+
 ## [0.1.0]
 
 ### Added

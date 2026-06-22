@@ -16,6 +16,16 @@ repository = "https://github.com/MacCracken/rosnet"
 [lib]
 modules = ["src/tensor.cyr", "src/linear.cyr"]
 
+# The GPU backend (ADR 0001) is a SEPARATE profile so the default CPU [lib] bundle stays
+# mabda-free. `cyrius distlib` bundles [lib.gpu].modules into dist/rosnet-gpu.cyr. It leaves
+# mabda's device/dispatch symbols (gpu_context_new_native / native_* / gpu_compute_dispatch /
+# gpu_shader_module_create_spirv / MABDA_*) + stdlib UNRESOLVED — a consumer that uses the GPU
+# path imports dist/rosnet-gpu.cyr AND declares [deps.mabda] (Linux-only, DRM). rosnet declares
+# NO top-level mabda dep: cyrius auto-prepends a dep's modules on every target, which would
+# contaminate the mabda-free CPU bundle and the AGNOS build. GPU tests pull mabda locally.
+[lib.gpu]
+modules = ["src/gpu.cyr"]
+
 [deps]
 stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math"]
 

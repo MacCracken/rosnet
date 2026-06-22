@@ -19,4 +19,4 @@ Decisions about rosnet — what we chose, the context, and the consequences we a
 
 ## Index
 
-_No ADRs yet. Add the first as `0001-kebab-case-title.md`._
+- [0001 — Adopt the GPU backend as a mabda-gated `[lib.gpu]` profile](0001-adopt-gpu-backend.md) — rosnet gains a GPU tensor backend, extracted from attn11 (M18/M19, the native-AMD f64 SPIR-V path on mabda). Hosted as a **separate `[lib.gpu]` profile** → `dist/rosnet-gpu.cyr`, so the default CPU `[lib]` bundle stays **mabda-free**; only GPU consumers opt in and supply mabda (symbols ship unresolved, the consumer-included-bundle pattern). rosnet declares no top-level mabda dep (cyrius auto-prepends on every target → CPU contamination); GPU tests pull mabda locally, device-dependent. **Accepted (0.2.0).** Mirrors [attn11 ADR 0017](https://github.com/MacCracken/attn11/blob/main/docs/adr/0017-extract-gpu-backend-to-rosnet.md).

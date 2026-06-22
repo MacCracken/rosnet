@@ -65,7 +65,7 @@ var _gpu_ck[1024];       # 128 packed keys
 var _gpu_cv[1024];       # 128 shader-module handles (or -1 = known compile-fail)
 var _gpu_cn = 0;
 var g_gpu_tc = 0;        # 1 = --gpu-tc: also run transcendental ops (GELU) on GPU at a
-                         # TOLERANCE (not bit-exact → breaks byte-identity); requires g_gpu
+# TOLERANCE (not bit-exact → breaks byte-identity); requires g_gpu
 var _gpu_mm_count = 0;   # forward matmuls actually dispatched on-device (engagement proof)
 var _gpu_ln_count = 0;   # forward layernorms actually dispatched on-device
 var _gpu_gelu_count = 0; # forward GELUs actually dispatched on-device (tolerance)
@@ -1726,7 +1726,7 @@ fn gpu_attn_core_bwd(Qc, Kc, Vc, Pc, dconcat, dQ, dK, dV, dprow, T, C, nh, nkv):
     var hd = C / nh; var Ckv = C;
     if (hd <= 0) { return 0 - 1; }
     if (hd > 32) { return 0 - 1; }              # pass A (dp) is UNTILED — unrolls hd into spv[8192];
-                                                # hd>32 would overflow the build buffer → CPU (never a crash)
+    # hd>32 would overflow the build buffer → CPU (never a crash)
     var TK = 16;
     var PN = nh * T * T;
     if ((PN * 8) > GPU_BO_MAX()) { return 0 - 1; }

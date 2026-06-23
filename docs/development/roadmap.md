@@ -6,8 +6,6 @@
 
 ## v1.0 criteria
 
-_Define before tagging v0.1.0:_
-
 - [ ] Public API frozen — every exported symbol documented and tested
 - [ ] Test coverage adequate for the surface area
 - [ ] Benchmarks captured in `docs/benchmarks.md`
@@ -23,13 +21,18 @@ _Define before tagging v0.1.0:_
 - Doc-tree per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
 - ADRs / architecture notes / guides / examples folders ready
 
-### M1 — _Title_ (v0.2.0)
+### M1 — GPU backend (v0.2.0) — ✅ shipped 2026-06-21
 
-_Replace this with the first real milestone. Specify the user-visible change, the dep gates, and the acceptance criteria._
+- `src/gpu.cyr` added as a separate `[lib.gpu]` profile → `dist/rosnet-gpu.cyr`
+  (ADR 0001), extracted whole from attn11 (M18/M19): native-AMD f64 SPIR-V on
+  mabda — GPU foundation + generic tensor ops + transformer ops.
+- CPU `[lib]` bundle left byte-identical (mabda-free); GPU consumers import the
+  GPU bundle and declare `[deps.mabda]` (Linux-only).
+- Validated bit-exact / ~1e-13 vs the CPU oracle in attn11 (1.10.0, GPU suite).
 
 ### M2 — _Title_ (v0.3.0)
 
-_…_
+_Replace with the next real milestone. Specify the user-visible change, the dep gates, and the acceptance criteria._
 
 ## Out of scope (for v1.0)
 

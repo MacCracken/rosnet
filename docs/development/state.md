@@ -21,23 +21,39 @@ mabda symbols ship unresolved). Validated bit-exact / ~1e-13 vs the CPU oracle i
 
 ## Source
 
-Initial scaffold only.
+- `src/tensor.cyr` — storage + BLAS-1 (`t_alloc`/`t_zero`/`t_fill`/`t_copy`,
+  `tget`/`tset`/`ff`, `t_axpy`/`t_add_into`/`t_scale`/`t_sum`, `f64_is_finite`,
+  `t_randn`).
+- `src/linear.cyr` — dense matmul + gradient (`linear_fwd`/`linear_bwd`).
+- `src/gpu.cyr` — GPU backend (`[lib.gpu]` profile, ADR 0001; mabda-gated,
+  Linux-only), extracted whole from attn11 (M18/M19).
+- `src/main.cyr` — smoke demo (`main()` + `SYS_EXIT`; excluded from the bundle).
+
+CPU `[lib]` bundle → `dist/rosnet.cyr`; GPU profile → `dist/rosnet-gpu.cyr`.
 
 ## Tests
 
-- `tests/rosnet.tcyr` — primary suite (smoke + math; passes on `cyrius test`)
-- `tests/rosnet.bcyr` — benchmark stub (no-op)
-- `tests/rosnet.fcyr` — fuzz stub
+- `tests/rosnet.tcyr` — primary suite: exact BLAS-1 checks + central
+  finite-difference grad-checks of `linear_bwd` (dx/dW/db, rel err < 1e-5).
+  **7/7 passing** on `cyrius test`.
+- `tests/rosnet.bcyr` — benchmark stub (no-op timing harness).
+- `tests/rosnet.fcyr` — fuzz stub.
 
 ## Dependencies
 
 Direct (declared in `cyrius.cyml`):
 
-- stdlib — string, fmt, alloc, io, vec, str, syscalls, assert
+- stdlib — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math
+- **tyche** (`0.1.1`) — deterministic statistical PRNG; supplies
+  `rng_seed`/`rng_normal` for `t_randn`. The only non-stdlib dep; pure
+  tensor/matmul ops need none. (The GPU profile additionally needs **mabda**,
+  supplied by the consumer — rosnet declares no top-level mabda dep.)
 
 ## Consumers
 
-_None yet._
+- **attn11** (1.10.0+) — consumes the GPU backend (`dist/rosnet-gpu.cyr`),
+  validated against its CPU path as the oracle. Also targeted by **tarka** and
+  **tentib** on the same f64 substrate.
 
 ## Next
 

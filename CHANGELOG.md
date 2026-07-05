@@ -4,6 +4,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-07-04
+
+**v1.0 — the substrate freeze.** No behavior change from 0.2.0: the cut freezes
+what **six shipping consumers** (attn11, tarka, tentib, prajna, rupantara,
+anukūlana) have exercised unchanged since 0.1.1 — the strongest dogfooding
+signal in the ecosystem — and closes the remaining v1.0 criteria. The whole
+surface rides the freeze, **CPU bundle + GPU profile** (mabda 4.x churn is
+provider-level — 4.0 added basic NVIDIA support — not the device/dispatch API
+the profile layers on).
+
+### Added
+- **`docs/api.md`** — the frozen 1.x public surface: CPU (`t_*` storage/BLAS-1,
+  `linear_fwd`/`linear_bwd`, guards/init) + GPU (gates `g_gpu`/`g_gpu_tc`,
+  13 ops in bit-exact/tolerance classes, `gpu_probe` + 11 engagement counters),
+  and the **memory contract** (flat row-major f64, shapes live in the caller,
+  no bounds checks by design). `_`-prefixed internals + `GPU_TK`/`GPU_BO_MAX`
+  tuning + the smoke `main()` stay out-of-freeze.
+- **`docs/benchmarks.md`** — v1.0 capture (Ryzen 7 5800H, cycc 6.4.2):
+  `t_axpy` n=768 **2 µs** · `linear_fwd` 64×768×768 **30.9 ms** ·
+  `linear_fwd` 1×768×12564 (¼ LM-head row) **8.5 ms** (full head ≈ 34 ms) ·
+  `linear_bwd` 64×768×768 **73.5 ms** (≈2.4× fwd). Read honestly: these are
+  correctness-first reference kernels ~1–2 orders behind a tuned BLAS — the
+  known cost of the sovereign substrate; closing it is post-1.0 (or GPU) work.
+- **`tests/rosnet.bcyr`** — the real benchmark harness replacing the no-op stub
+  (consumer-shaped sizes: GPT-2 projection, LM-head row, backward pair).
+- **`docs/audit/2026-07-04-audit.md`** — v1.0 hardening audit: **PASS, 0 code
+  changes**. The no-bounds-checks posture is audited as a deliberate substrate
+  contract (hot-path caller-guarantees, upheld by construction in all six
+  consumers), NOT tarka-style `guard()`s; `t_alloc` fail-loud + GPU
+  guard-before-upload (dims / dispatch-dim / BO-fit on every device entry) are
+  the standing 1.x invariants.
+
+### Changed
+- README: GPU-profile section + docs pointers + dep tag → 1.0.0; CLAUDE.md
+  identity corrected (Library, not Binary; mission statement filled in).
+
+### v1.0 criteria — all met
+✅ API frozen + documented (`docs/api.md`) · ✅ tests (7/7 incl. central-FD
+grad-checks of `linear_bwd`; GPU validated in-consumer vs the CPU oracle) ·
+✅ benchmarks (`docs/benchmarks.md`) · ✅ downstream consumers green (six) ·
+✅ CHANGELOG complete from 0.1.1 · ✅ security audit
+(`docs/audit/2026-07-04-audit.md`).
+
 ## [0.2.0] - 2026-06-21
 
 ### Added

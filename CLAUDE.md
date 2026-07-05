@@ -8,9 +8,11 @@
 
 ## Project Identity
 
-**rosnet** — rosnet — TODO
+**rosnet** — sovereign dense f64 tensor algebra: the BLAS substrate under the
+AGNOS ML family (storage, BLAS-1, matmul + its gradient; a mabda-gated GPU
+profile).
 
-- **Type**: Binary
+- **Type**: Library (dual-profile: CPU `dist/rosnet.cyr` + GPU `dist/rosnet-gpu.cyr`)
 - **License**: GPL-3.0-only
 - **Language**: Cyrius (toolchain pinned in `cyrius.cyml [package].cyrius`)
 - **Version**: `VERSION` at the project root is the source of truth — do not inline the number here
@@ -18,7 +20,13 @@
 
 ## Goal
 
-_TODO: one-or-two-sentence mission statement. What does rosnet OWN in the stack? Durable — doesn't change per release._
+Own the **numeric floor of sovereign ML**: flat row-major f64 tensors and the
+dense matmul **with its hand-derived, FD-gated gradient** — the reusable core
+under every gradient-based workload (attn11 / tarka / tentib / prajna /
+rupantara / anukūlana), with no BLAS, no libc, no autodiff. Shapes live in the
+caller; rosnet is the arithmetic, not the model. Public surface frozen at 1.0
+(`docs/api.md`); the substrate contract (caller-guarantees, no bounds checks —
+audited) is the load-bearing design decision.
 
 ## Current State
 

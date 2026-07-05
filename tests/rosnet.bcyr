@@ -1,21 +1,108 @@
-# rosnet benchmarks
-# Stdlib auto-included via cyrius.cyml
+# rosnet benchmarks — the v1.0 capture set (docs/benchmarks.md holds the numbers).
+# Stdlib auto-included via cyrius.cyml.
 #
 # Pattern: bench_new -> bench_batch_start -> tight loop -> bench_batch_stop -> bench_report.
 # For sub-1us ops use batch_size >= 1000 to amortize clock_gettime overhead
 # (~240 ns per start/stop pair on x86_64 Linux). See lib/bench.cyr header for
 # the full overhead-vs-batching guidance.
+#
+# Shapes are the substrate's real consumer shapes:
+#   - BLAS-1 axpy over 768 (one transformer channel row)
+#   - linear_fwd 64x768x768   (a GPT-2-small attention/MLP projection, T=64)
+#   - linear_fwd 1x768x50257  (the weight-tied LM head, one decode row)
+#   - linear_bwd 64x768x768   (the gradient pair of the projection)
+include "src/tensor.cyr"
+include "src/linear.cyr"
 
-fn bench_noop(): i64 { return 0; }
+fn bench_axpy_768(): i64 {
+    var n = 768;
+    var dst = t_alloc(n);
+    var src = t_alloc(n);
+    t_fill(dst, n, ff(1));
+    t_fill(src, n, ff(2));
+    var a = f64_div(ff(1), ff(3));
+    var b = bench_new("t_axpy n=768");
+    bench_batch_start(b);
+    var i = 0;
+    while (i < 100000) { t_axpy(dst, src, a, n); i = i + 1; }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+    return 0;
+}
+
+fn bench_linear_fwd_proj(): i64 {
+    var M = 64;
+    var K = 768;
+    var N = 768;
+    var x = t_alloc(M * K);
+    var W = t_alloc(K * N);
+    var bb = t_alloc(N);
+    var y = t_alloc(M * N);
+    t_fill(x, M * K, f64_div(ff(1), ff(7)));
+    t_fill(W, K * N, f64_div(ff(1), ff(11)));
+    t_fill(bb, N, f64_div(ff(1), ff(13)));
+    var b = bench_new("linear_fwd 64x768x768");
+    bench_batch_start(b);
+    var i = 0;
+    while (i < 10) { linear_fwd(x, W, bb, y, M, K, N); i = i + 1; }
+    bench_batch_stop(b, 10);
+    bench_report(b);
+    return 0;
+}
+
+fn bench_linear_fwd_head(): i64 {
+    # 1/4 of the GPT-2 LM head (full 768x50257 W = 309 MB f64, past the 256 MB
+    # alloc cap) — scale the avg x4 for the full weight-tied head row.
+    var M = 1;
+    var K = 768;
+    var N = 12564;
+    var x = t_alloc(M * K);
+    var W = t_alloc(K * N);
+    var y = t_alloc(M * N);
+    t_fill(x, M * K, f64_div(ff(1), ff(7)));
+    t_fill(W, K * N, f64_div(ff(1), ff(11)));
+    var b = bench_new("linear_fwd 1x768x12564 (1/4 LM head row)");
+    bench_batch_start(b);
+    var i = 0;
+    while (i < 10) { linear_fwd(x, W, 0, y, M, K, N); i = i + 1; }
+    bench_batch_stop(b, 10);
+    bench_report(b);
+    return 0;
+}
+
+fn bench_linear_bwd_proj(): i64 {
+    var M = 64;
+    var K = 768;
+    var N = 768;
+    var x = t_alloc(M * K);
+    var W = t_alloc(K * N);
+    var dy = t_alloc(M * N);
+    var dx = t_alloc(M * K);
+    var dW = t_alloc(K * N);
+    var db = t_alloc(N);
+    t_fill(x, M * K, f64_div(ff(1), ff(7)));
+    t_fill(W, K * N, f64_div(ff(1), ff(11)));
+    t_fill(dy, M * N, f64_div(ff(1), ff(5)));
+    var b = bench_new("linear_bwd 64x768x768");
+    bench_batch_start(b);
+    var i = 0;
+    while (i < 10) {
+        t_zero(dW, K * N);
+        t_zero(db, N);
+        linear_bwd(x, W, dy, dx, dW, db, M, K, N);
+        i = i + 1;
+    }
+    bench_batch_stop(b, 10);
+    bench_report(b);
+    return 0;
+}
 
 fn main(): i64 {
     alloc_init();
-    var b = bench_new("noop");
-    bench_batch_start(b);
-    var i = 0;
-    while (i < 1000000) { bench_noop(); i = i + 1; }
-    bench_batch_stop(b, 1000000);
-    bench_report(b);
+    bench_axpy_768();
+    bench_linear_fwd_proj();
+    bench_linear_fwd_head();
+    bench_linear_bwd_proj();
     return 0;
 }
 

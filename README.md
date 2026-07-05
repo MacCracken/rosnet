@@ -43,12 +43,34 @@ modules = ["dist/tyche.cyr"]
 Seed the stream with tyche's `rng_seed(s)` before `t_randn` for reproducible
 fills. (tyche is a *statistical* PRNG — never use it for crypto; that's sigil.)
 
+## GPU profile (`dist/rosnet-gpu.cyr`)
+
+A **separate** `[lib.gpu]` profile (ADR 0001) layers the same op surface onto
+[mabda](https://github.com/MacCracken/mabda)'s device/dispatch primitives —
+matmul/ln/gelu/adam/linear-bwd/ln-bwd + the transformer ops (attn-core / head /
+RoPE), each **self-falling-back to CPU** when no device is available, with
+engagement counters proving what actually ran on-device. The default CPU bundle
+stays mabda-free; a GPU consumer imports `dist/rosnet-gpu.cyr` **and** declares
+`[deps.mabda]` (Linux-only). Validated bit-exact / ~1e-13 vs the CPU oracle
+(attn11's GPU suite, AMD GFX9); provider coverage (mabda 4.0 added basic
+NVIDIA) evolves under mabda without touching this API.
+
+## Docs
+
+- [`docs/api.md`](docs/api.md) — the **frozen 1.x public surface** (CPU + GPU)
+  and the memory contract.
+- [`docs/benchmarks.md`](docs/benchmarks.md) — the v1.0 numbers, read honestly.
+- [`docs/audit/2026-07-04-audit.md`](docs/audit/2026-07-04-audit.md) — the v1.0
+  hardening audit (the no-bounds-checks substrate contract, audited).
+- [`docs/adr/0001-adopt-gpu-backend.md`](docs/adr/0001-adopt-gpu-backend.md) —
+  why GPU is a separate profile.
+
 ## Use as a dependency
 
 ```toml
 [deps.rosnet]
 git = "https://github.com/MacCracken/rosnet"
-tag = "0.1.1"
+tag = "1.0.0"
 modules = ["dist/rosnet.cyr"]
 ```
 

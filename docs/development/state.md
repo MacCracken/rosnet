@@ -5,19 +5,27 @@
 
 ## Version
 
-**0.2.0** — *added the GPU backend as a mabda-gated `[lib.gpu]` profile* (ADR 0001). `src/gpu.cyr`
-extracted whole from attn11 (M18/M19, native-AMD f64 SPIR-V on mabda) → `dist/rosnet-gpu.cyr` (2323
-lines): GPU foundation + generic tensor ops (matmul/ln/gelu/adam/linear_bwd/ln_bwd) + transformer ops
-(attn_core/head/rope). **The CPU `[lib]` bundle (`dist/rosnet.cyr`) code is unchanged** (only the version
-stamp moves to 0.2.0) — CPU-only consumers stay mabda-free; GPU consumers import `dist/rosnet-gpu.cyr` + declare `[deps.mabda]` (the
-mabda symbols ship unresolved). Validated bit-exact / ~1e-13 vs the CPU oracle in the first consumer
-(attn11 1.10.0, its 12-test GPU suite). cyrius pin unchanged (6.2.11); no top-level mabda dep.
+**1.0.0 — RELEASED 2026-07-04 (the substrate freeze).** No behavior change from
+0.2.0: froze what six shipping consumers exercised unchanged since 0.1.1.
+Public surface documented in [`docs/api.md`](../api.md) (CPU bundle + GPU
+profile both frozen — mabda 4.x churn is provider-level, 4.0 added basic
+NVIDIA, not the device/dispatch API). Benchmarks captured
+([`docs/benchmarks.md`](../benchmarks.md), Ryzen 7 5800H), audit PASS
+([`docs/audit/2026-07-04-audit.md`](../audit/2026-07-04-audit.md), 0 code
+changes — the no-bounds-checks caller-guarantees contract audited as
+deliberate). All six v1.0 criteria met.
 
-(**0.1.1** — scaffolded 2026-06-11 via `cyrius init`.)
+(**0.2.0** 2026-06-21 — GPU backend as the mabda-gated `[lib.gpu]` profile,
+ADR 0001, extracted whole from attn11 M18/M19, validated bit-exact/~1e-13 vs
+the CPU oracle in attn11's 12-test GPU suite. **0.1.1** — scaffolded
+2026-06-11 via `cyrius init`.)
 
 ## Toolchain
 
-- **Cyrius pin**: `6.2.11` (in `cyrius.cyml [package].cyrius`)
+- **Cyrius pin**: `6.2.11` (in `cyrius.cyml [package].cyrius`). Deliberately
+  deep-lag: the CPU surface is 245 bundled lines of stable arithmetic; the
+  6.3.13 array-locals-to-stack change is safe here (the SIMD accumulators are
+  32-byte locals). Bump opportunistically with a consumer-driven touch.
 
 ## Source
 
@@ -29,15 +37,19 @@ mabda symbols ship unresolved). Validated bit-exact / ~1e-13 vs the CPU oracle i
   Linux-only), extracted whole from attn11 (M18/M19).
 - `src/main.cyr` — smoke demo (`main()` + `SYS_EXIT`; excluded from the bundle).
 
-CPU `[lib]` bundle → `dist/rosnet.cyr`; GPU profile → `dist/rosnet-gpu.cyr`.
+CPU `[lib]` bundle → `dist/rosnet.cyr` (245 lines, v1.0.0); GPU profile →
+`dist/rosnet-gpu.cyr` (2323 lines, v1.0.0; regenerate with
+`cyrius distlib` + `cyrius distlib gpu`).
 
-## Tests
+## Tests / benches
 
 - `tests/rosnet.tcyr` — primary suite: exact BLAS-1 checks + central
   finite-difference grad-checks of `linear_bwd` (dx/dW/db, rel err < 1e-5).
   **7/7 passing** on `cyrius test`.
-- `tests/rosnet.bcyr` — benchmark stub (no-op timing harness).
-- `tests/rosnet.fcyr` — fuzz stub.
+- `tests/rosnet.bcyr` — the v1.0 benchmark harness (consumer-shaped sizes);
+  numbers in [`docs/benchmarks.md`](../benchmarks.md).
+- `tests/rosnet.fcyr` — fuzz stub (no untrusted-data parsing on this surface —
+  see the audit; becomes real if a quantized-dtype loader ever lands).
 
 ## Dependencies
 
@@ -49,12 +61,14 @@ Direct (declared in `cyrius.cyml`):
   tensor/matmul ops need none. (The GPU profile additionally needs **mabda**,
   supplied by the consumer — rosnet declares no top-level mabda dep.)
 
-## Consumers
+## Consumers (six, all green at the freeze)
 
-- **attn11** (1.10.0+) — consumes the GPU backend (`dist/rosnet-gpu.cyr`),
-  validated against its CPU path as the oracle. Also targeted by **tarka** and
-  **tentib** on the same f64 substrate.
+**attn11** (GPU backend consumer + oracle suite) · **tarka** · **tentib** ·
+**prajna** · **rupantara** (the transformer-forward lib) · **anukūlana**
+(Type-3 import — the real-GPT-2 forward runs on this substrate).
 
 ## Next
 
-See [`roadmap.md`](roadmap.md).
+Post-1.0 additive lane (demand-gated): conv2d fwd+bwd (the modality/Type-4
+gate), the f32/f16/bf16 wideners promotion, CPU matmul optimization when a
+consumer is throughput-blocked. See [`roadmap.md`](roadmap.md).

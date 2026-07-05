@@ -23,6 +23,10 @@ finite differences:
 - `linear_fwd(x, W, b, y, M, K, N)` — `y(M,N) = x(M,K) · W(K,N) [+ b(N)]`, 4-wide SIMD.
 - `linear_bwd(x, W, dy, dx, dW, db, M, K, N)` — writes `dx`, accumulates `dW`/`db` (`dx = dy·Wᵀ`, `dW = xᵀ·dy`). `b`/`db == 0` means "no bias".
 
+**Convolution (1.1)** — `conv2d_fwd`/`conv2d_bwd` (NCHW, per-axis stride +
+zero-padding, hand-derived FD-gated gradients) + `conv1d_fwd`/`conv1d_bwd`
+(exact H=1 wrappers). The modality-axis / diffusion primitive.
+
 **Guards / init** — `f64_is_finite(x)` (bit-pattern NaN/Inf check),
 `t_randn(p, n, std)` (normal-fill; see dependency note).
 
@@ -70,7 +74,7 @@ NVIDIA) evolves under mabda without touching this API.
 ```toml
 [deps.rosnet]
 git = "https://github.com/MacCracken/rosnet"
-tag = "1.0.0"
+tag = "1.1.0"
 modules = ["dist/rosnet.cyr"]
 ```
 

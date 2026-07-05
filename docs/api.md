@@ -45,7 +45,7 @@ audited rationale.)
 | `linear_fwd(x, W, b, y, M, K, N)` | `y(M,N) = x(M,K) · W(K,N) [+ b(N)]`; `b == 0` means no bias; 4-wide-SIMD dot, tree reduction |
 | `linear_bwd(x, W, dy, dx, dW, db, M, K, N)` | writes `dx = dy·Wᵀ`; **accumulates** `dW += xᵀ·dy`, `db += Σdy` (caller zeroes before a fresh pass); `db == 0` means no bias grad. FD-gated (central differences, rel err < 1e-5) |
 
-### Convolution (1.1 additive — lands with the 1.1.0 cut)
+### Convolution (added + frozen at 1.1.0, 2026-07-05)
 
 | Symbol | Contract |
 |--------|----------|
@@ -107,4 +107,5 @@ device actually ran, one per op: `gpu_mm_count` · `gpu_ln_count` ·
 - Everything `_`-prefixed (pool, cache, SPIR-V emitters, VA constants).
 - `GPU_TK()` / `GPU_BO_MAX()` tuning constants (may change with mabda arcs).
 - The smoke `main()` in `src/main.cyr` (not in either bundle).
-- Future additive surface (conv2d, quantized dtypes) lands as 1.x minors.
+- Future additive surface (quantized dtypes, pooling, im2col/SIMD conv
+  optimization) lands as 1.x minors. (conv2d/conv1d landed at 1.1.0.)

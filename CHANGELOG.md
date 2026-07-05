@@ -4,6 +4,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-07-05
+
 **conv2d/conv1d with hand-derived gradients — the 1.1 additive.** The last new
 LEARNED primitive gating the modality axis (sight + hearing) and the Type-4
 diffusion reference (per agnosticos `planning/multimodal-substrate.md` — every
@@ -34,8 +36,8 @@ blocks).
 ### Notes
 - Direct-convolution reference (deterministic accumulation order, no scratch)
   — correctness-first per the substrate's honest framing.
-- API-freeze status: **additive 1.x surface** — lands in `docs/api.md` at the
-  1.1.0 cut; the frozen 1.0 surface is untouched.
+- API-freeze status: **additive 1.x surface**, now frozen with this cut
+  (`docs/api.md`); the 1.0 surface is untouched.
 
 ## [1.0.0] - 2026-07-04
 

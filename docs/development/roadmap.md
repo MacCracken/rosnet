@@ -40,8 +40,7 @@
 
 ## Post-1.0 (additive 1.x minors, demand-gated)
 
-- **conv2d / conv1d fwd+bwd — ✅ LANDED 2026-07-05** (`[Unreleased]` → the
-  1.1.0 cut): NCHW, per-axis stride/pad, hand-derived dx/dW/db, FD-gated
+- **conv2d / conv1d fwd+bwd — ✅ LANDED 2026-07-05** (**cut as 1.1.0**, 2026-07-05): NCHW, per-axis stride/pad, hand-derived dx/dW/db, FD-gated
   across strided/padded/non-square configs + conv1d bit-parity; suite 7→23;
   benched. Opens the modality axis (sight proof next) AND Type-4 diffusion.
 - **IEEE-754 wideners** (f32/f16/bf16→f64) — promotion candidate from

@@ -5,10 +5,11 @@
 
 ## Version
 
-**[Unreleased] — conv2d/conv1d landed 2026-07-05** (the 1.1 additive: NCHW,
-per-axis stride/pad, hand-derived FD-gated gradients, conv1d H=1 wrappers;
-suite 7→**23**; dist 245→390 lines; benched ~1.1 G MAC/s). Cut as **1.1.0**
-on the maintainer's go.
+**1.1.0 — RELEASED 2026-07-05 (conv2d/conv1d).** The 1.1 additive: NCHW,
+per-axis stride/pad, hand-derived FD-gated gradients (incl. strided/padded/
+non-square configs), conv1d = exact H=1 wrappers; suite 7→**23**; dist
+245→390 lines; benched ~1.1 G MAC/s. **The modality axis is now
+substrate-complete** (agnosticos `planning/multimodal-substrate.md`).
 
 **1.0.0 — RELEASED 2026-07-04 (the substrate freeze).** No behavior change from
 0.2.0: froze what six shipping consumers exercised unchanged since 0.1.1.
@@ -43,8 +44,8 @@ the CPU oracle in attn11's 12-test GPU suite. **0.1.1** — scaffolded
   Linux-only), extracted whole from attn11 (M18/M19).
 - `src/main.cyr` — smoke demo (`main()` + `SYS_EXIT`; excluded from the bundle).
 
-CPU `[lib]` bundle → `dist/rosnet.cyr` (245 lines, v1.0.0); GPU profile →
-`dist/rosnet-gpu.cyr` (2323 lines, v1.0.0; regenerate with
+CPU `[lib]` bundle → `dist/rosnet.cyr` (390 lines, v1.1.0); GPU profile →
+`dist/rosnet-gpu.cyr` (2323 lines, v1.1.0; regenerate with
 `cyrius distlib` + `cyrius distlib gpu`).
 
 ## Tests / benches

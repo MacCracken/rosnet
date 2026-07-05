@@ -19,6 +19,8 @@
 | `linear_fwd` | 64×768×768 (GPT-2 projection, T=64) | **30.9 ms** | 37.7 M MAC → ~1.2 G MAC/s (~2.4 GFLOP/s) |
 | `linear_fwd` | 1×768×12564 (¼ LM-head row¹) | **8.5 ms** | full 50257-vocab head row ≈ **34 ms** |
 | `linear_bwd` | 64×768×768 | **73.5 ms** | ≈ 2.4× fwd (dx + dW + db — three passes) |
+| `conv2d_fwd` (1.1) | 8×8×28×28→8, 3×3, pad 1 | **32.4 ms** | 36.1 M MAC → ~1.1 G MAC/s (direct loops hold the linear-kernel rate) |
+| `conv2d_bwd` (1.1) | same shape | **43.3 ms** | ≈ 1.3× fwd (dx scatter + dW gather + db) |
 
 ¹ the full weight-tied head W (768×50257 f64 = 309 MB) exceeds the 256 MB alloc
 cap, so the bench runs a ¼-vocab slice; the op is linear in N.

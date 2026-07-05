@@ -5,6 +5,11 @@
 
 ## Version
 
+**[Unreleased] — conv2d/conv1d landed 2026-07-05** (the 1.1 additive: NCHW,
+per-axis stride/pad, hand-derived FD-gated gradients, conv1d H=1 wrappers;
+suite 7→**23**; dist 245→390 lines; benched ~1.1 G MAC/s). Cut as **1.1.0**
+on the maintainer's go.
+
 **1.0.0 — RELEASED 2026-07-04 (the substrate freeze).** No behavior change from
 0.2.0: froze what six shipping consumers exercised unchanged since 0.1.1.
 Public surface documented in [`docs/api.md`](../api.md) (CPU bundle + GPU
@@ -33,6 +38,7 @@ the CPU oracle in attn11's 12-test GPU suite. **0.1.1** — scaffolded
   `tget`/`tset`/`ff`, `t_axpy`/`t_add_into`/`t_scale`/`t_sum`, `f64_is_finite`,
   `t_randn`).
 - `src/linear.cyr` — dense matmul + gradient (`linear_fwd`/`linear_bwd`).
+- `src/conv.cyr` — conv2d/conv1d fwd+bwd (1.1 additive; per-axis stride/pad).
 - `src/gpu.cyr` — GPU backend (`[lib.gpu]` profile, ADR 0001; mabda-gated,
   Linux-only), extracted whole from attn11 (M18/M19).
 - `src/main.cyr` — smoke demo (`main()` + `SYS_EXIT`; excluded from the bundle).

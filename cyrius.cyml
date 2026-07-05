@@ -14,7 +14,7 @@ repository = "https://github.com/MacCracken/rosnet"
 # UNRESOLVED in the bundle, so a consumer of rosnet that uses t_randn must also
 # declare [deps.tyche]. Pure tensor/matmul ops need no such transitive dep.
 [lib]
-modules = ["src/tensor.cyr", "src/linear.cyr"]
+modules = ["src/tensor.cyr", "src/linear.cyr", "src/conv.cyr"]
 
 # The GPU backend (ADR 0001) is a SEPARATE profile so the default CPU [lib] bundle stays
 # mabda-free. `cyrius distlib` bundles [lib.gpu].modules into dist/rosnet-gpu.cyr. It leaves

@@ -4,6 +4,39 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+**conv2d/conv1d with hand-derived gradients — the 1.1 additive.** The last new
+LEARNED primitive gating the modality axis (sight + hearing) and the Type-4
+diffusion reference (per agnosticos `planning/multimodal-substrate.md` — every
+other frontend piece already landed: chitra decode, hisab FFT, rupantara
+blocks).
+
+### Added
+- **`src/conv.cyr`** (joins the CPU `[lib]` bundle, 245→390 dist lines):
+  `conv2d_fwd(x, Wf, b, y, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW)` +
+  `conv2d_bwd(...)` — NCHW row-major, **per-axis stride/padding** (so audio
+  stems stride along time only), zero-padding, optional bias; backward follows
+  the linear_bwd convention (dx written — pass 0 to skip, e.g. a data-input
+  first layer; dW/db accumulated) with all three gradients hand-derived
+  (dW = x⊛dy gather; dx = the transpose-conv scatter; db = Σdy).
+  `conv1d_fwd/bwd` = exact H=1 wrappers (no phantom padding on the dummy
+  axis — the per-axis design exists precisely for this), bit-identical to the
+  2D path by construction.
+- **FD gates** (suite 7→**23**): known answers (1×1 kernel affine identity,
+  sum-kernel, padding-corner arithmetic) + central-finite-difference checks of
+  dx/dW/db (rel < 1e-5, the linear_bwd gate) across three configurations —
+  multi-batch/channel 3×3, **strided+padded non-square** (2×3 kernel, S 2×2,
+  P 1×1), and a 1×K row case — plus conv1d↔conv2d bit-parity.
+- **Benchmarks** (`docs/benchmarks.md`): 8×8×28×28→8 (3×3, pad 1) fwd
+  **32.4 ms** / bwd **43.3 ms** (~1.1 G MAC/s — the direct loops hold the
+  substrate's linear-kernel rate; im2col/SIMD is the named later
+  optimization, fed by the in-progress cyrius SIMD arc when it releases).
+
+### Notes
+- Direct-convolution reference (deterministic accumulation order, no scratch)
+  — correctness-first per the substrate's honest framing.
+- API-freeze status: **additive 1.x surface** — lands in `docs/api.md` at the
+  1.1.0 cut; the frozen 1.0 surface is untouched.
+
 ## [1.0.0] - 2026-07-04
 
 **v1.0 — the substrate freeze.** No behavior change from 0.2.0: the cut freezes

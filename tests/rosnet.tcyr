@@ -8,6 +8,7 @@
 include "lib/tyche.cyr"
 include "src/tensor.cyr"
 include "src/linear.cyr"
+include "src/conv.cyr"
 
 fn _eps(): i64 { return f64_div(f64_from(1), f64_from(10000)); }     # 1e-4
 
@@ -42,6 +43,73 @@ fn check(name, analytic, numeric, n, tol_inv): i64 {
 fn lin_loss(x, W, b, y, dy, M, K, N): i64 {
     linear_fwd(x, W, b, y, M, K, N);
     return dotsum(dy, y, M * N);
+}
+
+# conv scalar loss: y = conv2d(x, Wf) + b ; L = <dy, y>  (dL/dy = dy exactly)
+fn conv_loss(x, Wf, b, y, dy, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW): i64 {
+    conv2d_fwd(x, Wf, b, y, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+    var OH = conv2d_out_dim(H, KH, SH, PH);
+    var OW = conv2d_out_dim(W, KW, SW, PW);
+    return dotsum(dy, y, N * Cout * OH * OW);
+}
+
+# FD-gate one conv2d configuration end-to-end (dx, dW, db vs central diffs)
+fn conv_fd_case(name, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW): i64 {
+    var OH = conv2d_out_dim(H, KH, SH, PH);
+    var OW = conv2d_out_dim(W, KW, SW, PW);
+    var x = t_alloc(N * Cin * H * W);
+    var Wf = t_alloc(Cout * Cin * KH * KW);
+    var b = t_alloc(Cout);
+    var y = t_alloc(N * Cout * OH * OW);
+    var dy = t_alloc(N * Cout * OH * OW);
+    t_randn(x, N * Cin * H * W, f64_from(1));
+    t_randn(Wf, Cout * Cin * KH * KW, f64_from(1));
+    t_randn(b, Cout, f64_from(1));
+    t_randn(dy, N * Cout * OH * OW, f64_from(1));
+    var dx = t_alloc(N * Cin * H * W);
+    var dW = t_alloc(Cout * Cin * KH * KW);
+    var db = t_alloc(Cout);
+    conv2d_bwd(x, Wf, dy, dx, dW, db, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+    var eps = _eps(); var te = f64_mul(f64_from(2), eps);
+    var nx = N * Cin * H * W;
+    var ndx = t_alloc(nx); var i = 0;
+    while (i < nx) {
+        var o = load64(x + i * 8);
+        store64(x + i * 8, f64_add(o, eps));
+        var lp = conv_loss(x, Wf, b, y, dy, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+        store64(x + i * 8, f64_sub(o, eps));
+        var lm = conv_loss(x, Wf, b, y, dy, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+        store64(x + i * 8, o); store64(ndx + i * 8, f64_div(f64_sub(lp, lm), te)); i = i + 1;
+    }
+    var nw = Cout * Cin * KH * KW;
+    var ndW = t_alloc(nw); i = 0;
+    while (i < nw) {
+        var o = load64(Wf + i * 8);
+        store64(Wf + i * 8, f64_add(o, eps));
+        var lp = conv_loss(x, Wf, b, y, dy, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+        store64(Wf + i * 8, f64_sub(o, eps));
+        var lm = conv_loss(x, Wf, b, y, dy, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+        store64(Wf + i * 8, o); store64(ndW + i * 8, f64_div(f64_sub(lp, lm), te)); i = i + 1;
+    }
+    var ndb = t_alloc(Cout); i = 0;
+    while (i < Cout) {
+        var o = load64(b + i * 8);
+        store64(b + i * 8, f64_add(o, eps));
+        var lp = conv_loss(x, Wf, b, y, dy, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+        store64(b + i * 8, f64_sub(o, eps));
+        var lm = conv_loss(x, Wf, b, y, dy, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+        store64(b + i * 8, o); store64(ndb + i * 8, f64_div(f64_sub(lp, lm), te)); i = i + 1;
+    }
+    var nm = str_builder_new();
+    str_builder_add_cstr(nm, name); str_builder_add_cstr(nm, " dx");
+    check(str_cstr(str_builder_build(nm)), dx, ndx, nx, 100000);
+    var nm2 = str_builder_new();
+    str_builder_add_cstr(nm2, name); str_builder_add_cstr(nm2, " dW");
+    check(str_cstr(str_builder_build(nm2)), dW, ndW, nw, 100000);
+    var nm3 = str_builder_new();
+    str_builder_add_cstr(nm3, name); str_builder_add_cstr(nm3, " db");
+    check(str_cstr(str_builder_build(nm3)), db, ndb, Cout, 100000);
+    return 0;
 }
 
 fn main() {
@@ -97,6 +165,47 @@ fn main() {
     check("linear dx", dx, ndx, M * K, 100000);   # rel err < 1e-5
     check("linear dW", dW, ndW, K * N, 100000);
     check("linear db", db, ndb, N, 100000);
+
+    # ---- conv2d/conv1d: known answers + FD gates across configurations ----
+    test_group("conv known-answer");
+    # 1x1 kernel, weight 2, bias 1: y = 2x + 1 exactly
+    var cx = t_alloc(4);                         # N=1 Cin=1 H=2 W=2
+    t_fill(cx, 4, f64_from(3));
+    var cw = t_alloc(1); store64(cw, f64_from(2));
+    var cb = t_alloc(1); store64(cb, f64_from(1));
+    var cy = t_alloc(4);
+    conv2d_fwd(cx, cw, cb, cy, 1, 1, 2, 2, 1, 1, 1, 1, 1, 0, 0);
+    assert(cy != 0, "conv fwd ran");
+    assert(load64(cy) == f64_from(7), "1x1 conv: y = 2*3 + 1");
+    assert(t_sum(cy, 4) == f64_from(28), "1x1 conv: all four outputs");
+    # 2x2 all-ones kernel on all-ones 3x3 input, no pad: each output = 4
+    var sx = t_alloc(9); t_fill(sx, 9, f64_from(1));
+    var sw = t_alloc(4); t_fill(sw, 4, f64_from(1));
+    var sy = t_alloc(4);
+    conv2d_fwd(sx, sw, 0, sy, 1, 1, 3, 3, 1, 2, 2, 1, 1, 0, 0);
+    assert(t_sum(sy, 4) == f64_from(16), "2x2 sum kernel: 4 outputs of 4");
+    # padding: same 2x2 kernel with P=1 -> OH=OW=4; corners see 1 input cell
+    var py = t_alloc(16);
+    conv2d_fwd(sx, sw, 0, py, 1, 1, 3, 3, 1, 2, 2, 1, 1, 1, 1);
+    assert(load64(py) == f64_from(1), "padded corner sees one cell");
+    assert(t_sum(py, 16) == f64_from(36), "padded conv total = 9 cells x 4 taps");
+
+    test_group("conv grad-check");
+    conv_fd_case("conv 3x3", 2, 2, 5, 5, 3, 3, 3, 1, 1, 0, 0);
+    conv_fd_case("conv strided+padded", 1, 2, 6, 7, 2, 3, 2, 2, 2, 1, 1);
+    conv_fd_case("conv nonsquare 1xK", 1, 1, 1, 9, 2, 1, 3, 1, 2, 0, 1);
+
+    test_group("conv1d wrapper parity");
+    # conv1d must be bit-identical to conv2d with H=KH=1 (same code path)
+    var l1x = t_alloc(8); t_randn(l1x, 8, f64_from(1));      # N=1 Cin=1 L=8
+    var l1w = t_alloc(3); t_randn(l1w, 3, f64_from(1));      # K=3
+    var OL = conv2d_out_dim(8, 3, 2, 1);
+    var y1 = t_alloc(OL); var y2 = t_alloc(OL);
+    conv1d_fwd(l1x, l1w, 0, y1, 1, 1, 8, 1, 3, 2, 1);
+    conv2d_fwd(l1x, l1w, 0, y2, 1, 1, 1, 8, 1, 1, 3, 1, 2, 0, 1);
+    var pd = 0; var pi = 0;
+    while (pi < OL) { if (load64(y1 + pi * 8) != load64(y2 + pi * 8)) { pd = pd + 1; } pi = pi + 1; }
+    assert(pd == 0, "conv1d == conv2d(H=1) bit-identical");
 
     return assert_summary();
 }

@@ -13,6 +13,7 @@
 #   - linear_bwd 64x768x768   (the gradient pair of the projection)
 include "src/tensor.cyr"
 include "src/linear.cyr"
+include "src/conv.cyr"
 
 fn bench_axpy_768(): i64 {
     var n = 768;
@@ -97,12 +98,46 @@ fn bench_linear_bwd_proj(): i64 {
     return 0;
 }
 
+fn bench_conv2d(): i64 {
+    # an MNIST-class hidden conv layer: 8x8x28x28 -> 8, 3x3, stride 1, pad 1
+    var N = 8; var Cin = 8; var H = 28; var W = 28;
+    var Cout = 8; var K = 3;
+    var x = t_alloc(N * Cin * H * W);
+    var Wf = t_alloc(Cout * Cin * K * K);
+    var b = t_alloc(Cout);
+    var y = t_alloc(N * Cout * H * W);
+    t_fill(x, N * Cin * H * W, f64_div(ff(1), ff(7)));
+    t_fill(Wf, Cout * Cin * K * K, f64_div(ff(1), ff(11)));
+    var bh = bench_new("conv2d_fwd 8x8x28x28 -> 8 (3x3, pad 1)");
+    bench_batch_start(bh);
+    var i = 0;
+    while (i < 10) { conv2d_fwd(x, Wf, b, y, N, Cin, H, W, Cout, K, K, 1, 1, 1, 1); i = i + 1; }
+    bench_batch_stop(bh, 10);
+    bench_report(bh);
+    var dx = t_alloc(N * Cin * H * W);
+    var dW = t_alloc(Cout * Cin * K * K);
+    var db = t_alloc(Cout);
+    var bh2 = bench_new("conv2d_bwd same shape");
+    bench_batch_start(bh2);
+    i = 0;
+    while (i < 10) {
+        t_zero(dW, Cout * Cin * K * K);
+        t_zero(db, Cout);
+        conv2d_bwd(x, Wf, y, dx, dW, db, N, Cin, H, W, Cout, K, K, 1, 1, 1, 1);
+        i = i + 1;
+    }
+    bench_batch_stop(bh2, 10);
+    bench_report(bh2);
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     bench_axpy_768();
     bench_linear_fwd_proj();
     bench_linear_fwd_head();
     bench_linear_bwd_proj();
+    bench_conv2d();
     return 0;
 }
 

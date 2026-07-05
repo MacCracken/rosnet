@@ -45,6 +45,15 @@ audited rationale.)
 | `linear_fwd(x, W, b, y, M, K, N)` | `y(M,N) = x(M,K) · W(K,N) [+ b(N)]`; `b == 0` means no bias; 4-wide-SIMD dot, tree reduction |
 | `linear_bwd(x, W, dy, dx, dW, db, M, K, N)` | writes `dx = dy·Wᵀ`; **accumulates** `dW += xᵀ·dy`, `db += Σdy` (caller zeroes before a fresh pass); `db == 0` means no bias grad. FD-gated (central differences, rel err < 1e-5) |
 
+### Convolution (1.1 additive — lands with the 1.1.0 cut)
+
+| Symbol | Contract |
+|--------|----------|
+| `conv2d_out_dim(in, K, S, P)` | `(in + 2P − K)/S + 1` |
+| `conv2d_fwd(x, Wf, b, y, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW)` | NCHW ⊛ (Cout,Cin,KH,KW) [+ b(Cout)]; per-axis stride/zero-padding; `b == 0` no bias |
+| `conv2d_bwd(x, Wf, dy, dx, dW, db, …same dims…)` | dx **written** (0 = skip); dW/db **accumulate**; FD-gated incl. stride/pad/non-square |
+| `conv1d_fwd/bwd(x, Wf, [b/dy…], N, Cin, L, Cout, K, S, P)` | exact H=1 wrappers, bit-identical to the 2D path |
+
 ### Guards / init
 
 | Symbol | Contract |

@@ -308,17 +308,17 @@ fn conv2d_fwd(x, Wf, b, y, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW): i64 {
                         while (kh < KH) {
                             var ih = oh * SH - PH + kh;
                             if (ih >= 0) { if (ih < H) {
-                                var kw = 0;
-                                while (kw < KW) {
-                                    var iw = ow * SW - PW + kw;
-                                    if (iw >= 0) { if (iw < W) {
-                                        var xv = load64(x + (((n * Cin + ci) * H + ih) * W + iw) * 8);
-                                        var wv = load64(Wf + (((co * Cin + ci) * KH + kh) * KW + kw) * 8);
-                                        acc = f64_add(acc, f64_mul(xv, wv));
-                                    } }
-                                    kw = kw + 1;
-                                }
-                            } }
+                                    var kw = 0;
+                                    while (kw < KW) {
+                                        var iw = ow * SW - PW + kw;
+                                        if (iw >= 0) { if (iw < W) {
+                                                var xv = load64(x + (((n * Cin + ci) * H + ih) * W + iw) * 8);
+                                                var wv = load64(Wf + (((co * Cin + ci) * KH + kh) * KW + kw) * 8);
+                                                acc = f64_add(acc, f64_mul(xv, wv));
+                                            } }
+                                        kw = kw + 1;
+                                    }
+                                } }
                             kh = kh + 1;
                         }
                         ci = ci + 1;
@@ -359,22 +359,22 @@ fn conv2d_bwd(x, Wf, dy, dx, dW, db, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW)
                         while (kh < KH) {
                             var ih = oh * SH - PH + kh;
                             if (ih >= 0) { if (ih < H) {
-                                var kw = 0;
-                                while (kw < KW) {
-                                    var iw = ow * SW - PW + kw;
-                                    if (iw >= 0) { if (iw < W) {
-                                        var xi = (((n * Cin + ci) * H + ih) * W + iw) * 8;
-                                        var wi = (((co * Cin + ci) * KH + kh) * KW + kw) * 8;
-                                        store64(dW + wi,
-                                        f64_add(load64(dW + wi), f64_mul(load64(x + xi), g)));
-                                        if (dx != 0) {
-                                            store64(dx + xi,
-                                            f64_add(load64(dx + xi), f64_mul(load64(Wf + wi), g)));
-                                        }
-                                    } }
-                                    kw = kw + 1;
-                                }
-                            } }
+                                    var kw = 0;
+                                    while (kw < KW) {
+                                        var iw = ow * SW - PW + kw;
+                                        if (iw >= 0) { if (iw < W) {
+                                                var xi = (((n * Cin + ci) * H + ih) * W + iw) * 8;
+                                                var wi = (((co * Cin + ci) * KH + kh) * KW + kw) * 8;
+                                                store64(dW + wi,
+                                                f64_add(load64(dW + wi), f64_mul(load64(x + xi), g)));
+                                                if (dx != 0) {
+                                                    store64(dx + xi,
+                                                    f64_add(load64(dx + xi), f64_mul(load64(Wf + wi), g)));
+                                                }
+                                            } }
+                                        kw = kw + 1;
+                                    }
+                                } }
                             kh = kh + 1;
                         }
                         ci = ci + 1;

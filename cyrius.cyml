@@ -30,9 +30,9 @@ modules = ["src/gpu.cyr"]
 stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math"]
 
 # Sovereign deterministic statistical PRNG — supplies rng_seed / rng_normal for
-# t_randn (weight init). Pinned to the 0.1.1 release.
+# t_randn (weight init). Pinned to the 1.0.1 release (the frozen 1.x surface).
 [deps.tyche]
 git = "https://github.com/MacCracken/tyche"
-tag = "0.1.1"
+tag = "1.0.1"
 modules = ["dist/tyche.cyr"]
 ---

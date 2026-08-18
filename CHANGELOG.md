@@ -12,6 +12,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib
   snapshot, clearing the toolchain-drift and `./lib/ shadows version-pinned` warnings.
   Retires the deliberate deep-lag recorded in `docs/development/state.md` — the consumer-driven touch arrived. Suite **23/23**, identical to the pre-bump baseline; the 6.3.13 array-locals-to-stack change was safe here as predicted (the SIMD accumulators are 32-byte locals). Cleared a 12-module shadow warning.
+- **`[deps.tyche]` `0.1.1` -> `1.0.1`** — the first step of the substrate-freeze propagation.
+  tyche cut **1.0.0** on 2026-07-05 and froze its 1.x surface (`rng_seed` / `rng_u64` /
+  `rng_uniform` / `rng_normal` + the documented `_rng_state` checkpoint exception), and rosnet
+  — one of the four consumers whose unchanged use *was* the readiness evidence for that freeze
+  — had never moved off the pre-1.0 tag. No behavior change: `t_randn`'s only call is
+  `rng_normal`, which is in the frozen set. Verified the bump actually took rather than merely
+  built — vendored `lib/tyche.cyr` header moved to `# Version: 1.0.1`, `cyrius.lock` resolved
+  tag `1.0.1` at commit `73197d4`, and its recorded content hash matches the file on disk.
+  Suite **23/23**, unchanged.
 
 ## [1.1.0] - 2026-07-05
 

@@ -74,7 +74,7 @@ NVIDIA) evolves under mabda without touching this API.
 ```toml
 [deps.rosnet]
 git = "https://github.com/MacCracken/rosnet"
-tag = "1.1.0"
+tag = "1.1.1"
 modules = ["dist/rosnet.cyr"]
 ```
 

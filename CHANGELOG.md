@@ -4,6 +4,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-08-17
+
+### Changed
+
+- **Cyrius pin `6.2.11` -> `6.5.27`** (2026-08-17, ecosystem-wide ML/AI-arc realign ahead of
+  the arc reopening). `cyrius lib sync --full` re-vendored the whole version-matched stdlib
+  snapshot, clearing the toolchain-drift and `./lib/ shadows version-pinned` warnings.
+  Retires the deliberate deep-lag recorded in `docs/development/state.md` — the consumer-driven touch arrived. Suite **23/23**, identical to the pre-bump baseline; the 6.3.13 array-locals-to-stack change was safe here as predicted (the SIMD accumulators are 32-byte locals). Cleared a 12-module shadow warning.
+
 ## [1.1.0] - 2026-07-05
 
 **conv2d/conv1d with hand-derived gradients — the 1.1 additive.** The last new

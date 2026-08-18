@@ -7,7 +7,7 @@
 # `Result<T, E>` shape using v5.8.21 generic-parameter syntax.
 # Tagged.cyr transitively `include`s this file so existing
 # consumers (lib/net.cyr, lib/ws_server.cyr, lib/sandhi.cyr,
-# tests/tcyr/tagged.tcyr) stay working unchanged.
+# tests/tcyr/stdlib/tagged.tcyr) stay working unchanged.
 #
 # Layout — same as the v5.8.23 compiler-generated form:
 #   tag at +0  (0 = Ok, 1 = Err — matches prior OK/ERR convention)
@@ -15,7 +15,7 @@
 #
 # Type parameters T/E are syntactically accepted but not yet
 # bound semantically (mono-only, erasure semantics — same status
-# as `enum TwoParams<T, E>` in tests/tcyr/enum_generics.tcyr).
+# as `enum TwoParams<T, E>` in tests/tcyr/lang/enum_generics.tcyr).
 # Subsequent slots in the v5.8.28–v5.8.32 sub-suite layer the
 # `?` propagation operator (v5.8.29) and stdlib migrations
 # (v5.8.30/.31) on top.
@@ -45,7 +45,16 @@ fn result_unwrap(res): i64 {
         var elen = fmt_int_buf(load64(res + 8), &ebuf);
         syscall(1, 2, &ebuf, elen);
         syscall(1, 2, ")\n", 2);
+        # Portable abort: agnos exit=#0; else #60 (backend → per-target exit).
+        # v6.2.39 — was a bare syscall(60,1) that no-op'd on agnos (#60 is an
+        # undefined number → kernel returns -1), so unwrap-on-Err FAILED-OPEN
+        # and continued with garbage. Same guard as vec/str/hashmap/tagged _die.
+        #ifdef CYRIUS_TARGET_AGNOS
+        syscall(0, 1);
+        #endif
+        #ifndef CYRIUS_TARGET_AGNOS
         syscall(60, 1);
+        #endif
     }
     return load64(res + 8);
 }

@@ -28,10 +28,13 @@ the CPU oracle in attn11's 12-test GPU suite. **0.1.1** — scaffolded
 
 ## Toolchain
 
-- **Cyrius pin**: `6.2.11` (in `cyrius.cyml [package].cyrius`). Deliberately
-  deep-lag: the CPU surface is 245 bundled lines of stable arithmetic; the
-  6.3.13 array-locals-to-stack change is safe here (the SIMD accumulators are
-  32-byte locals). Bump opportunistically with a consumer-driven touch.
+- **Cyrius pin**: `6.5.27` (in `cyrius.cyml [package].cyrius`). **Bumped
+  6.2.11 -> 6.5.27 on 2026-08-17** (ML/AI-arc realign) — the deliberate deep-lag
+  is retired: the consumer-driven touch arrived, and the 23-assertion suite is
+  byte-for-byte the same result at the new pin (23/23 before and after). The
+  6.3.13 array-locals-to-stack change was safe here as predicted (the SIMD
+  accumulators are 32-byte locals); `cyrius lib sync --full` re-vendored the
+  version-matched stdlib snapshot, clearing a 12-module shadow warning.
 
 ## Source
 

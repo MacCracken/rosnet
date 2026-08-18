@@ -7,6 +7,10 @@ include "lib/fmt.cyr"
 # pulled in here so test consumers get the full assertion +
 # OOM-driving stack from a single include.
 include "lib/alloc.cyr"
+# v6.2.38: syscalls peer for the portable `sys_exit` used by panic() /
+# assert_fatal() below (arch-dispatched: SYS_EXIT 60/93/0, Win ExitProcess).
+# Double-include-safe; pulls only DCE-dead wrappers into test consumers.
+include "lib/syscalls.cyr"
 #
 # Now that comparisons work in function arguments, assert(x == 42, "name") works.
 
@@ -28,6 +32,29 @@ fn assert(cond, name): i64 {
     return 0;
 }
 
+# Fail-loud runtime panic — print `msg` to stderr (fd 2), then ABORT.
+# Unlike assert() (a test-harness check: print-and-continue, tallied by
+# assert_summary), panic() STOPS the process. Use it for runtime
+# precondition guards in library/runtime code, where continuing past a
+# violated invariant would corrupt memory in a no-bounds-checking
+# language. Portable: sys_exit dispatches per target (incl. Windows
+# ExitProcess). Filed by tarka 0.8.0; see CHANGELOG [6.2.38].
+fn panic(msg): i64 {
+    syscall(1, 2, "panic: ", 7);
+    syscall(1, 2, msg, strlen(msg));
+    syscall(1, 2, "\n", 1);
+    sys_exit(1);
+    return 0;                 # unreachable — keeps the i64 return well-formed
+}
+
+# Fail-loud assertion: like assert() but ABORTS on a violated condition
+# instead of tallying it. Keeps the test/runtime distinction explicit at
+# the call site — reach for this (not assert) in non-test guard code.
+fn assert_fatal(cond, msg): i64 {
+    if (cond == 0) { panic(msg); }
+    return 0;
+}
+
 # Assert a equals b, print expected vs got on failure
 fn assert_eq(a, b, name): i64 {
     _assert_total = _assert_total + 1;
@@ -37,10 +64,16 @@ fn assert_eq(a, b, name): i64 {
         _assert_fail = _assert_fail + 1;
         syscall(1, 2, "  FAIL: ", 8);
         syscall(1, 2, name, strlen(name));
+        # ⚠ efmt_int, NOT fmt_int (v6.5.19). fmt_int writes to fd 1 while every other
+        # byte of this message goes to fd 2, so any harness that captures the two
+        # streams separately — scripts/cross-os-libtest-runner.sh, every cross-OS ssh
+        # probe, `2> err` in the gates — saw `FAIL: name (got , expected )` with the
+        # two numbers orphaned in stdout, unattached to the assertion that produced
+        # them. It cost real time diagnosing the ecb/ach bench_timer_floor failure.
         syscall(1, 2, " (got ", 6);
-        fmt_int(a);
+        efmt_int(a);
         syscall(1, 2, ", expected ", 11);
-        fmt_int(b);
+        efmt_int(b);
         syscall(1, 2, ")\n", 2);
     }
     return 0;

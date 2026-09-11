@@ -50,7 +50,7 @@ fn linear_fwd(x, W, b, y, M, K, N): i64 {
             }
             while (n < N) {
                 store64(yrow + n * 8, f64_add(load64(yrow + n * 8),
-                f64_mul(xmk, load64(Wrow + n * 8))));
+                    f64_mul(xmk, load64(Wrow + n * 8))));
                 n = n + 1;
             }
             k = k + 1;
@@ -87,7 +87,7 @@ fn linear_bwd(x, W, dy, dx, dW, db, M, K, N): i64 {
                 n = n + 4;
             }
             var s = f64_add(f64_add(load64(&acc), load64(&acc + 8)),
-            f64_add(load64(&acc + 16), load64(&acc + 24)));
+              f64_add(load64(&acc + 16), load64(&acc + 24)));
             while (n < N) {
                 s = f64_add(s, f64_mul(load64(dyrow + n * 8), load64(Wrow + n * 8)));
                 n = n + 1;
@@ -114,7 +114,7 @@ fn linear_bwd(x, W, dy, dx, dW, db, M, K, N): i64 {
             }
             while (n < N) {
                 store64(dWrow + n * 8, f64_add(load64(dWrow + n * 8),
-                f64_mul(xmk, load64(dyrow + n * 8))));
+                    f64_mul(xmk, load64(dyrow + n * 8))));
                 n = n + 1;
             }
             mm = mm + 1;

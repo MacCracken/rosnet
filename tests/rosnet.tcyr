@@ -26,7 +26,7 @@ fn maxrel(analytic, numeric, n): i64 {
     while (i < n) {
         var a = load64(analytic + i * 8); var b = load64(numeric + i * 8);
         var rel = f64_div(f64_abs(f64_sub(a, b)),
-        f64_add(f64_add(f64_abs(a), f64_abs(b)), tiny));
+          f64_add(f64_add(f64_abs(a), f64_abs(b)), tiny));
         if (f64_gt(rel, mr) == 1) { mr = rel; }
         i = i + 1;
     }

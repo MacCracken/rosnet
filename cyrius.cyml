@@ -4,7 +4,7 @@ version = "${file:VERSION}"
 description = "rosnet — sovereign dense f64 tensor algebra (the BLAS substrate): storage, BLAS-1, matmul + its gradient."
 license = "GPL-3.0-only"
 language = "cyrius"
-cyrius = "6.5.27"
+cyrius = "6.6.2"
 repository = "https://github.com/MacCracken/rosnet"
 
 # `cyrius distlib` concatenates [lib].modules (in order) into dist/rosnet.cyr —

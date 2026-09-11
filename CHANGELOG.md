@@ -4,6 +4,49 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-09-11
+
+### Fixed — the GPU bundle shipped a retired accessor
+
+⛔ **Invisible to a build, found only by cyrius 6.6.2's new distlib check.**
+`src/gpu.cyr` lives in the `[lib.gpu]` profile — not in `[lib]`, not in the
+default entry — so `cyrius build` never compiles it and reported zero errors.
+It called `payload(...)` twice (`_gpu_init` and `gpu_probe`), an accessor cyrius
+**deleted at 6.6.0**. `dist/rosnet-gpu.cyr` shipped both, so any consumer
+importing that bundle alongside `[deps.mabda]` could not have linked at 6.6.x.
+
+6.6.2 surfaced it by refusing to emit the bundle at all:
+
+```
+error: distlib: the bundle calls a RETIRED stdlib name: dist/rosnet-gpu.cyr
+      symbol: payload
+```
+
+Both sites now bind the `(tag, payload)` pair. The regenerated bundle scans zero
+retired names.
+
+### Changed
+
+- **Toolchain `6.5.27` → `6.6.2`** — the largest pin jump in this sweep. The
+  default profile (`tensor` / `linear` / `conv`) needed no change; **23
+  assertions** pass unchanged.
+- `dist/rosnet-gpu.deps` now lists its 14 stdlib leaves. It was empty apart from
+  its two comment lines, so a consumer got no leaf requirements at all. All 14
+  resolve against the 6.6.2 stdlib — including `mabda`, which is a *folded*
+  stdlib module at 6.6.x, not a git dep, so listing it is correct.
+
+### Note — `distlib gpu` still errors, by design
+
+The gpu profile deliberately leaves mabda's device/dispatch symbols for the
+consumer to supply (see the `[lib.gpu]` comment in `cyrius.cyml`). Undefined
+*functions* are downgraded on the grounds that a bundle omits the stdlib — but
+undefined *enum constants* are not, so `MABDA_MAX_DISPATCH_DIM`, `_NATIVE_PERM_DATA`
+and `F64_PI` make 6.6.2's stricter check report the bundle as non-compiling. The
+bundle is still emitted and is correct for its documented use. CI gates only
+`cyrius distlib` (the default profile), so nothing here is red — but anyone
+running `cyrius distlib gpu` by hand will see the error.
+
+
 ## [1.1.1] - 2026-08-17
 
 ### Changed

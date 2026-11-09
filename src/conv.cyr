@@ -26,47 +26,256 @@
 #
 # Implementation: DIRECT convolution loops — correctness-first, deterministic
 # accumulation order, no scratch (im2col+matmul / SIMD lanes are the later
-# optimization; see docs/benchmarks.md's honest framing).
+# optimization; see docs/benchmarks.md's honest framing). Each output sums its
+# in-bounds taps in (ci, kh, kw) order; the loops visit exactly those taps in
+# exactly that order, so the result is the plain nested-loop sum bit for bit.
+# The in-bounds tap window is computed once per output position — kh in
+# [kh_lo, kh_hi) keeps 0 <= oh·SH − PH + kh < H, kw in [kw_lo, kw_hi) keeps
+# 0 <= ow·SW − PW + kw < W — instead of bounds-testing every multiply-add, and
+# row base pointers are hoisted out of the tap loops (1.2.2).
 
+# Output length of a K-tap window, stride S, zero padding P, over inn inputs.
 fn conv2d_out_dim(inn, K, S, P): i64 { return (inn + 2 * P - K) / S + 1; }
+
+# The first in-bounds tap index for a window starting at input index i0.
+fn _conv_lo(i0): i64 {
+    if (i0 < 0) { return 0 - i0; }
+    return 0;
+}
+
+# One past the last in-bounds tap index (a window of K taps from i0, input of
+# length L). May be <= _conv_lo when the window misses the input entirely.
+fn _conv_hi(i0, K, L): i64 {
+    if (L - i0 < K) { return L - i0; }
+    return K;
+}
+
+# conv2d_fwd for SW == 1: vectorized ALONG the output row. For one tap
+# (ci, kh, kw), every output ow whose input column ow − PW + kw is in range gains
+# x·w — a contiguous run of x — so the run is done as tmp = x·w (f64v_scale) then
+# acc += tmp (f64v_add). Both are a single rounding per element on every target,
+# exactly f64_mul then f64_add, and each output still sums its taps in
+# (ci, kh, kw) order, so the result is bit-identical to the scalar loops. The row
+# is processed in chunks of up to 128 outputs (two 1 KB fn-local buffers); the
+# f64v builtins write whole 2-lane pairs, so each call gets an even count and an
+# odd last element is done alone.
+fn _conv2d_fwd_s1(x, Wf, b, y, N, Cin, H, W, Cout, KH, KW, SH, PH, PW, OH, OW): i64 {
+    var acc[1024];                    # 128 f64 output accumulators (bytes, fn-local)
+    var tmp[1024];                    # 128 f64 products
+    var xstride = H * W * 8;
+    var wstride = KH * KW * 8;
+    var n = 0;
+    while (n < N) {
+        var xn = x + n * Cin * xstride;
+        var co = 0;
+        while (co < Cout) {
+            var wco = Wf + co * Cin * wstride;
+            var bias = f64_from(0);
+            if (b != 0) { bias = load64(b + co * 8); }
+            var oh = 0;
+            while (oh < OH) {
+                var ih0 = oh * SH - PH;       # SH is free; only SW is 1 here
+                var kh_lo = _conv_lo(ih0);
+                var kh_hi = _conv_hi(ih0, KH, H);
+                var yrow = y + (((n * Cout + co) * OH + oh) * OW) * 8;
+                var c0 = 0;
+                while (c0 < OW) {
+                    var c1 = c0 + 128;
+                    if (c1 > OW) { c1 = OW; }
+                    var j = 0;
+                    while (j < c1 - c0) { store64(&acc + j * 8, bias); j = j + 1; }
+                    var xc = xn;
+                    var wc = wco;
+                    var ci = 0;
+                    while (ci < Cin) {
+                        var kh = kh_lo;
+                        while (kh < kh_hi) {
+                            var xrow = xc + (ih0 + kh) * W * 8;
+                            var wr = wc + kh * KW * 8;
+                            var kw = 0;
+                            while (kw < KW) {
+                                var wv = load64(wr + kw * 8);
+                                var lo = PW - kw;             # input column ow − PW + kw >= 0
+                                if (lo < c0) { lo = c0; }
+                                var hi = W + PW - kw;         # ... and < W
+                                if (hi > c1) { hi = c1; }
+                                if (lo < hi) {
+                                    var cnt = hi - lo;
+                                    var c2 = cnt - (cnt % 2);
+                                    var src = xrow + (lo - PW + kw) * 8;
+                                    var dst = &acc + (lo - c0) * 8;
+                                    f64v_scale(&tmp, src, wv, c2);
+                                    f64v_add(dst, dst, &tmp, c2);
+                                    if (c2 < cnt) {
+                                        store64(dst + c2 * 8, f64_add(load64(dst + c2 * 8),
+                                            f64_mul(load64(src + c2 * 8), wv)));
+                                    }
+                                }
+                                kw = kw + 1;
+                            }
+                            kh = kh + 1;
+                        }
+                        xc = xc + xstride;
+                        wc = wc + wstride;
+                        ci = ci + 1;
+                    }
+                    j = 0;
+                    while (j < c1 - c0) { store64(yrow + (c0 + j) * 8, load64(&acc + j * 8)); j = j + 1; }
+                    c0 = c1;
+                }
+                oh = oh + 1;
+            }
+            co = co + 1;
+        }
+        n = n + 1;
+    }
+    return 0;
+}
 
 # y(N,Cout,OH,OW) = x ⊛ Wf [+ b]; b == 0 means no bias.
 fn conv2d_fwd(x, Wf, b, y, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW): i64 {
     var OH = conv2d_out_dim(H, KH, SH, PH);
     var OW = conv2d_out_dim(W, KW, SW, PW);
+    if (SW == 1) { return _conv2d_fwd_s1(x, Wf, b, y, N, Cin, H, W, Cout, KH, KW, SH, PH, PW, OH, OW); }
+    var xstride = H * W * 8;          # bytes per input channel plane
+    var wstride = KH * KW * 8;        # bytes per filter channel plane
+    var yp = y;                       # y is written in (n, co, oh, ow) order
     var n = 0;
     while (n < N) {
+        var xn = x + n * Cin * xstride;
         var co = 0;
         while (co < Cout) {
+            var wco = Wf + co * Cin * wstride;
+            var bias = f64_from(0);
+            if (b != 0) { bias = load64(b + co * 8); }
             var oh = 0;
             while (oh < OH) {
+                var ih0 = oh * SH - PH;
+                var kh_lo = _conv_lo(ih0);
+                var kh_hi = _conv_hi(ih0, KH, H);
                 var ow = 0;
                 while (ow < OW) {
-                    var acc = f64_from(0);
-                    if (b != 0) { acc = load64(b + co * 8); }
+                    var iw0 = ow * SW - PW;
+                    var kw_lo = _conv_lo(iw0);
+                    var kw_hi = _conv_hi(iw0, KW, W);
+                    var acc = bias;
+                    var xc = xn;
+                    var wc = wco;
                     var ci = 0;
                     while (ci < Cin) {
-                        var kh = 0;
-                        while (kh < KH) {
-                            var ih = oh * SH - PH + kh;
-                            if (ih >= 0) { if (ih < H) {
-                                    var kw = 0;
-                                    while (kw < KW) {
-                                        var iw = ow * SW - PW + kw;
-                                        if (iw >= 0) { if (iw < W) {
-                                                var xv = load64(x + (((n * Cin + ci) * H + ih) * W + iw) * 8);
-                                                var wv = load64(Wf + (((co * Cin + ci) * KH + kh) * KW + kw) * 8);
-                                                acc = f64_add(acc, f64_mul(xv, wv));
-                                            } }
-                                        kw = kw + 1;
-                                    }
-                                } }
+                        var kh = kh_lo;
+                        while (kh < kh_hi) {
+                            var xr = xc + ((ih0 + kh) * W + iw0) * 8;   # x[n, ci, ih0+kh, iw0 + ·]
+                            var wr = wc + kh * KW * 8;                  # Wf[co, ci, kh, ·]
+                            var kw = kw_lo;
+                            while (kw < kw_hi) {
+                                acc = f64_add(acc, f64_mul(load64(xr + kw * 8), load64(wr + kw * 8)));
+                                kw = kw + 1;
+                            }
                             kh = kh + 1;
                         }
+                        xc = xc + xstride;
+                        wc = wc + wstride;
                         ci = ci + 1;
                     }
-                    store64(y + (((n * Cout + co) * OH + oh) * OW + ow) * 8, acc);
+                    store64(yp, acc);
+                    yp = yp + 8;
                     ow = ow + 1;
+                }
+                oh = oh + 1;
+            }
+            co = co + 1;
+        }
+        n = n + 1;
+    }
+    return 0;
+}
+
+# conv2d_bwd for SW == 1 (dx already zeroed by the caller). The scalar loops add
+# into each gradient element in a fixed order, and this keeps every order:
+#   db[co]          += dy over (n, oh, ow) ascending — a scalar running sum.
+#   dW[co,ci,kh,kw] += x·dy over (n, oh, ow) ascending. A sequential chain, so the
+#                      adds stay scalar; only the products are packed (f64v_mul,
+#                      x·g in the scalar's operand order, one rounding each).
+#   dx[n,ci,ih,iw]  += w·dy over (co, oh, ow) ascending. Within one (co, oh) row
+#                      the contributing taps are ow = iw + PW − kw, so walking kw
+#                      DOWN visits ow UP; each run is then tmp = dy·w (f64v_scale)
+#                      and dx += tmp (f64v_add), a single rounding each.
+# So every value is bit-identical to the scalar loops, except that a NaN made
+# from two NaN operands may carry the other operand's payload (dy·w for w·dy).
+fn _conv2d_bwd_s1(x, Wf, dy, dx, dW, db, N, Cin, H, W, Cout, KH, KW, SH, PH, PW, OH, OW): i64 {
+    var tmp[1024];                    # 128 f64 products (bytes, fn-local)
+    var xstride = H * W * 8;
+    var wstride = KH * KW * 8;
+    var n = 0;
+    while (n < N) {
+        var xoff_n = n * Cin * xstride;   # byte offset of x[n] / dx[n]
+        var co = 0;
+        while (co < Cout) {
+            var woff_co = co * Cin * wstride;   # byte offset of Wf[co] / dW[co]
+            var oh = 0;
+            while (oh < OH) {
+                var ih0 = oh * SH - PH;
+                var kh_lo = _conv_lo(ih0);
+                var kh_hi = _conv_hi(ih0, KH, H);
+                var dyrow = dy + (((n * Cout + co) * OH + oh) * OW) * 8;
+                if (db != 0) {
+                    var bacc = load64(db + co * 8);
+                    var j = 0;
+                    while (j < OW) { bacc = f64_add(bacc, load64(dyrow + j * 8)); j = j + 1; }
+                    store64(db + co * 8, bacc);
+                }
+                var c0 = 0;
+                while (c0 < OW) {
+                    var c1 = c0 + 128;
+                    if (c1 > OW) { c1 = OW; }
+                    var xc = xoff_n;
+                    var wc = woff_co;
+                    var ci = 0;
+                    while (ci < Cin) {
+                        var kh = kh_lo;
+                        while (kh < kh_hi) {
+                            var roff = xc + (ih0 + kh) * W * 8;   # x / dx row (ih0 + kh)
+                            var toff = wc + kh * KW * 8;          # Wf / dW row kh
+                            var kw = KW - 1;
+                            while (kw >= 0) {
+                                var lo = PW - kw;
+                                if (lo < c0) { lo = c0; }
+                                var hi = W + PW - kw;
+                                if (hi > c1) { hi = c1; }
+                                if (lo < hi) {
+                                    var cnt = hi - lo;
+                                    var c2 = cnt - (cnt % 2);
+                                    var col = roff + (lo - PW + kw) * 8;
+                                    var gs = dyrow + lo * 8;
+                                    f64v_mul(&tmp, x + col, gs, c2);
+                                    if (c2 < cnt) {
+                                        store64(&tmp + c2 * 8, f64_mul(load64(x + col + c2 * 8), load64(gs + c2 * 8)));
+                                    }
+                                    var wacc = load64(dW + toff + kw * 8);
+                                    var t = 0;
+                                    while (t < cnt) { wacc = f64_add(wacc, load64(&tmp + t * 8)); t = t + 1; }
+                                    store64(dW + toff + kw * 8, wacc);
+                                    if (dx != 0) {
+                                        var wv = load64(Wf + toff + kw * 8);
+                                        var ds = dx + col;
+                                        f64v_scale(&tmp, gs, wv, c2);
+                                        f64v_add(ds, ds, &tmp, c2);
+                                        if (c2 < cnt) {
+                                            store64(ds + c2 * 8, f64_add(load64(ds + c2 * 8),
+                                                f64_mul(wv, load64(gs + c2 * 8))));
+                                        }
+                                    }
+                                }
+                                kw = kw - 1;
+                            }
+                            kh = kh + 1;
+                        }
+                        xc = xc + xstride;
+                        wc = wc + wstride;
+                        ci = ci + 1;
+                    }
+                    c0 = c1;
                 }
                 oh = oh + 1;
             }
@@ -83,42 +292,55 @@ fn conv2d_bwd(x, Wf, dy, dx, dW, db, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW)
     var OH = conv2d_out_dim(H, KH, SH, PH);
     var OW = conv2d_out_dim(W, KW, SW, PW);
     if (dx != 0) { t_zero(dx, N * Cin * H * W); }
+    if (SW == 1) { return _conv2d_bwd_s1(x, Wf, dy, dx, dW, db, N, Cin, H, W, Cout, KH, KW, SH, PH, PW, OH, OW); }
+    var xstride = H * W * 8;
+    var wstride = KH * KW * 8;
+    var dyp = dy;                     # dy is read in (n, co, oh, ow) order
     var n = 0;
     while (n < N) {
+        var xoff_n = n * Cin * xstride;   # byte offset of x[n] (and of dx[n])
         var co = 0;
         while (co < Cout) {
+            var woff_co = co * Cin * wstride;   # byte offset of Wf[co] (and of dW[co])
             var oh = 0;
             while (oh < OH) {
+                var ih0 = oh * SH - PH;
+                var kh_lo = _conv_lo(ih0);
+                var kh_hi = _conv_hi(ih0, KH, H);
                 var ow = 0;
                 while (ow < OW) {
-                    var g = load64(dy + (((n * Cout + co) * OH + oh) * OW + ow) * 8);
+                    var iw0 = ow * SW - PW;
+                    var kw_lo = _conv_lo(iw0);
+                    var kw_hi = _conv_hi(iw0, KW, W);
+                    var g = load64(dyp);
+                    dyp = dyp + 8;
                     if (db != 0) {
                         store64(db + co * 8, f64_add(load64(db + co * 8), g));
                     }
+                    var xc = xoff_n;
+                    var wc = woff_co;
                     var ci = 0;
                     while (ci < Cin) {
-                        var kh = 0;
-                        while (kh < KH) {
-                            var ih = oh * SH - PH + kh;
-                            if (ih >= 0) { if (ih < H) {
-                                    var kw = 0;
-                                    while (kw < KW) {
-                                        var iw = ow * SW - PW + kw;
-                                        if (iw >= 0) { if (iw < W) {
-                                                var xi = (((n * Cin + ci) * H + ih) * W + iw) * 8;
-                                                var wi = (((co * Cin + ci) * KH + kh) * KW + kw) * 8;
-                                                store64(dW + wi,
-                                                  f64_add(load64(dW + wi), f64_mul(load64(x + xi), g)));
-                                                if (dx != 0) {
-                                                    store64(dx + xi,
-                                                      f64_add(load64(dx + xi), f64_mul(load64(Wf + wi), g)));
-                                                }
-                                            } }
-                                        kw = kw + 1;
-                                    }
-                                } }
+                        var kh = kh_lo;
+                        while (kh < kh_hi) {
+                            var xr = xc + ((ih0 + kh) * W + iw0) * 8;
+                            var wr = wc + kh * KW * 8;
+                            var kw = kw_lo;
+                            while (kw < kw_hi) {
+                                var xi = xr + kw * 8;
+                                var wi = wr + kw * 8;
+                                store64(dW + wi,
+                                  f64_add(load64(dW + wi), f64_mul(load64(x + xi), g)));
+                                if (dx != 0) {
+                                    store64(dx + xi,
+                                      f64_add(load64(dx + xi), f64_mul(load64(Wf + wi), g)));
+                                }
+                                kw = kw + 1;
+                            }
                             kh = kh + 1;
                         }
+                        xc = xc + xstride;
+                        wc = wc + wstride;
                         ci = ci + 1;
                     }
                     ow = ow + 1;
@@ -140,6 +362,7 @@ fn conv1d_fwd(x, Wf, b, y, N, Cin, L, Cout, K, S, P): i64 {
     return conv2d_fwd(x, Wf, b, y, N, Cin, 1, L, Cout, 1, K, 1, S, 0, P);
 }
 
+# conv1d backward: conv2d_bwd with H = KH = 1 (dx written, dW / db accumulated).
 fn conv1d_bwd(x, Wf, dy, dx, dW, db, N, Cin, L, Cout, K, S, P): i64 {
     return conv2d_bwd(x, Wf, dy, dx, dW, db, N, Cin, 1, L, Cout, 1, K, 1, S, 0, P);
 }

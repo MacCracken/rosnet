@@ -16,18 +16,20 @@
 # Linear:  y(M,N) = x(M,K) @ W(K,N) [+ b(N)]
 # ===========================================================================
 # SIMD note: matmul is ~80% of a training step. We vectorize over the
-# contiguous output dim N (W is row-major (K,N), so W[k, n..n+3] is contiguous),
-# 4-wide via the packed multiply-add builtin f64v_fmadd(out,a,b,c,4) (out may
-# alias c). Loop order is (m, k, n): y[m,:] is initialised to the bias then
-# accumulated as y[m, n..n+3] += x[m,k] * W[k, n..n+3]. This is an AXPY whose
-# per-element += sequence over k is unchanged, so it is BIT-IDENTICAL to the
-# scalar version on this toolchain (f64v_fmadd lowers to mulpd+addpd, which
-# rounds the same as f64_mul+f64_add). N not a multiple of 4 -> a scalar tail.
-# SIMD-typed vars are never reassigned (a known miscompile); the broadcast and
-# accumulator live in plain byte buffers.
+# contiguous output dim N (W is row-major (K,N), so W[k, n..] is contiguous).
+# Loop order is (m, k, n): y[m,:] is initialised to the bias then accumulated
+# as y[m, 0..n4) += x[m,k] * W[k, 0..n4) by ONE f64v_axpy per (m, k) — the
+# packed y += alpha*x builtin with a scalar alpha, so no broadcast buffer.
+# The per-element += sequence over k is the scalar one, so on x86_64 the result
+# is BIT-IDENTICAL to scalar f64_mul+f64_add (f64v_axpy lowers to mulpd+addpd:
+# two roundings). On aarch64 every packed multiply-add (f64v_axpy, f64v_fmadd)
+# lowers to a fused FMLA — one rounding — so there the vector body and the
+# scalar tail round differently and results differ from x86_64 in the last bits.
+# n4 = N rounded down to a multiple of 4 (the 1.2.1 split, kept so every element
+# takes the same path as before); the f64v builtins have no scalar tail and
+# write whole 2-lane pairs, so the count passed must stay even.
 fn linear_fwd(x, W, b, y, M, K, N): i64 {
-    var n4 = N - (N % 4);           # 4-lane vector body; scalar tail for 0..3
-    var xv[32];                     # broadcast buffer [x_mk x4]
+    var n4 = N - (N % 4);           # vector body; scalar tail for 0..3
     var m = 0;
     while (m < M) {
         var yrow = y + m * N * 8;
@@ -37,17 +39,13 @@ fn linear_fwd(x, W, b, y, M, K, N): i64 {
             else { store64(yrow + n * 8, f64_from(0)); }
             n = n + 1;
         }
+        var xrow = x + m * K * 8;
         var k = 0;
         while (k < K) {
-            var xmk = load64(x + (m * K + k) * 8);
-            store64(&xv, xmk); store64(&xv + 8, xmk);
-            store64(&xv + 16, xmk); store64(&xv + 24, xmk);
+            var xmk = load64(xrow + k * 8);
             var Wrow = W + k * N * 8;
-            n = 0;
-            while (n < n4) {
-                f64v_fmadd(yrow + n * 8, &xv, Wrow + n * 8, yrow + n * 8, 4);
-                n = n + 4;
-            }
+            f64v_axpy(yrow, Wrow, xmk, n4);
+            n = n4;
             while (n < N) {
                 store64(yrow + n * 8, f64_add(load64(yrow + n * 8),
                     f64_mul(xmk, load64(Wrow + n * 8))));
@@ -70,8 +68,7 @@ fn linear_fwd(x, W, b, y, M, K, N): i64 {
 # (~1e-16, far inside the grad-check tolerance) — gradients are unchanged.
 fn linear_bwd(x, W, dy, dx, dW, db, M, K, N): i64 {
     var n4 = N - (N % 4);
-    var acc[32];                    # 4-lane dot accumulator
-    var xv[32];                     # broadcast buffer
+    var acc[32];                    # 4-lane dot accumulator (32 bytes, fn-local)
     # dx[m,k] = sum_n dy[m,n] * W[k,n]
     var m = 0;
     while (m < M) {
@@ -81,6 +78,8 @@ fn linear_bwd(x, W, dy, dx, dW, db, M, K, N): i64 {
             var Wrow = W + k * N * 8;
             store64(&acc, f64_from(0)); store64(&acc + 8, f64_from(0));
             store64(&acc + 16, f64_from(0)); store64(&acc + 24, f64_from(0));
+            # lane j sums the n ≡ j (mod 4) terms in order; that 4-chain shape IS the
+            # result's bits, so the call stays 4-wide (a wider call = more chains)
             var n = 0;
             while (n < n4) {
                 f64v_fmadd(&acc, dyrow + n * 8, Wrow + n * 8, &acc, 4);
@@ -97,21 +96,16 @@ fn linear_bwd(x, W, dy, dx, dW, db, M, K, N): i64 {
         }
         m = m + 1;
     }
-    # dW[k,n] += sum_m x[m,k] * dy[m,n]
+    # dW[k,n] += sum_m x[m,k] * dy[m,n] — the same one-call axpy as linear_fwd
     var kk = 0;
     while (kk < K) {
         var dWrow = dW + kk * N * 8;
         var mm = 0;
         while (mm < M) {
             var xmk = load64(x + (mm * K + kk) * 8);
-            store64(&xv, xmk); store64(&xv + 8, xmk);
-            store64(&xv + 16, xmk); store64(&xv + 24, xmk);
             var dyrow = dy + mm * N * 8;
-            var n = 0;
-            while (n < n4) {
-                f64v_fmadd(dWrow + n * 8, &xv, dyrow + n * 8, dWrow + n * 8, 4);
-                n = n + 4;
-            }
+            f64v_axpy(dWrow, dyrow, xmk, n4);
+            var n = n4;
             while (n < N) {
                 store64(dWrow + n * 8, f64_add(load64(dWrow + n * 8),
                     f64_mul(xmk, load64(dyrow + n * 8))));

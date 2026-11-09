@@ -7,10 +7,15 @@
 # the full overhead-vs-batching guidance.
 #
 # Shapes are the substrate's real consumer shapes:
-#   - BLAS-1 axpy over 768 (one transformer channel row)
+#   - BLAS-1 over 768 (one transformer channel row): axpy, scale, add_into, sum,
+#     copy; and the 768x768 zero a training step pays to reset dW
 #   - linear_fwd 64x768x768   (a GPT-2-small attention/MLP projection, T=64)
-#   - linear_fwd 1x768x50257  (the weight-tied LM head, one decode row)
+#   - linear_fwd 1x768x12564  (a quarter of the weight-tied LM head, one decode row)
 #   - linear_bwd 64x768x768   (the gradient pair of the projection)
+#   - conv2d 8x8x28x28 -> 8, 3x3 pad 1 (an MNIST-class hidden layer), fwd + bwd
+#   - conv1d 4x16x1024 -> 16, K=5 pad 2 (an audio stem), fwd + bwd
+# Labels are kept stable across releases: scripts/bench-history.sh keys
+# bench-history.csv rows on them.
 include "src/tensor.cyr"
 include "src/linear.cyr"
 include "src/conv.cyr"
@@ -29,6 +34,51 @@ fn bench_axpy_768(): i64 {
     bench_batch_stop(b, 100000);
     bench_report(b);
     return 0;
+}
+
+# The other BLAS-1 ops at the same channel-row length, and the bulk zero a
+# training step pays to reset a 768x768 dW.
+fn bench_blas1_768(): i64 {
+    var n = 768;
+    var dst = t_alloc(n);
+    var src = t_alloc(n);
+    t_fill(dst, n, ff(1));
+    t_fill(src, n, f64_div(ff(1), ff(3)));
+    var s = f64_div(ff(9), ff(10));
+    var b = bench_new("t_scale n=768");
+    bench_batch_start(b);
+    var i = 0;
+    while (i < 100000) { t_scale(dst, n, s); i = i + 1; }
+    bench_batch_stop(b, 100000);
+    bench_report(b);
+    t_fill(dst, n, ff(1));
+    var b2 = bench_new("t_add_into n=768");
+    bench_batch_start(b2);
+    i = 0;
+    while (i < 100000) { t_add_into(dst, src, n); i = i + 1; }
+    bench_batch_stop(b2, 100000);
+    bench_report(b2);
+    var acc = 0;
+    var b3 = bench_new("t_sum n=768");
+    bench_batch_start(b3);
+    i = 0;
+    while (i < 100000) { acc = acc ^ t_sum(src, n); i = i + 1; }
+    bench_batch_stop(b3, 100000);
+    bench_report(b3);
+    var b4 = bench_new("t_copy n=768");
+    bench_batch_start(b4);
+    i = 0;
+    while (i < 100000) { t_copy(dst, src, n); i = i + 1; }
+    bench_batch_stop(b4, 100000);
+    bench_report(b4);
+    var big = t_alloc(768 * 768);
+    var b5 = bench_new("t_zero n=768x768");
+    bench_batch_start(b5);
+    i = 0;
+    while (i < 100) { t_zero(big, 768 * 768); i = i + 1; }
+    bench_batch_stop(b5, 100);
+    bench_report(b5);
+    return acc;
 }
 
 fn bench_linear_fwd_proj(): i64 {
@@ -131,15 +181,49 @@ fn bench_conv2d(): i64 {
     return 0;
 }
 
+fn bench_conv1d(): i64 {
+    # an audio-stem conv: 4x16x1024 -> 16, K=5, stride 1, pad 2
+    var N = 4; var Cin = 16; var L = 1024; var Cout = 16; var K = 5;
+    var x = t_alloc(N * Cin * L);
+    var Wf = t_alloc(Cout * Cin * K);
+    var b = t_alloc(Cout);
+    var y = t_alloc(N * Cout * L);
+    t_fill(x, N * Cin * L, f64_div(ff(1), ff(7)));
+    t_fill(Wf, Cout * Cin * K, f64_div(ff(1), ff(11)));
+    var bh = bench_new("conv1d_fwd 4x16x1024 -> 16 (K=5, pad 2)");
+    bench_batch_start(bh);
+    var i = 0;
+    while (i < 10) { conv1d_fwd(x, Wf, b, y, N, Cin, L, Cout, K, 1, 2); i = i + 1; }
+    bench_batch_stop(bh, 10);
+    bench_report(bh);
+    var dx = t_alloc(N * Cin * L);
+    var dW = t_alloc(Cout * Cin * K);
+    var db = t_alloc(Cout);
+    var bh2 = bench_new("conv1d_bwd same shape");
+    bench_batch_start(bh2);
+    i = 0;
+    while (i < 10) {
+        t_zero(dW, Cout * Cin * K);
+        t_zero(db, Cout);
+        conv1d_bwd(x, Wf, y, dx, dW, db, N, Cin, L, Cout, K, 1, 2);
+        i = i + 1;
+    }
+    bench_batch_stop(bh2, 10);
+    bench_report(bh2);
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     bench_axpy_768();
+    bench_blas1_768();
     bench_linear_fwd_proj();
     bench_linear_fwd_head();
     bench_linear_bwd_proj();
     bench_conv2d();
+    bench_conv1d();
     return 0;
 }
 
 var r = main();
-syscall(60, r);
+syscall(SYS_EXIT, r);

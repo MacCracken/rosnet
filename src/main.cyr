@@ -6,6 +6,7 @@ include "lib/tyche.cyr"
 include "src/tensor.cyr"
 include "src/linear.cyr"
 
+# Smoke entry: random-init a 2x3 @ 3x4 linear layer and check every output is finite.
 fn main() {
     alloc_init();
     rng_seed(7);

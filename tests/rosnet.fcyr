@@ -1,16 +1,163 @@
-# rosnet fuzz harness
+# rosnet fuzz harness — deterministic property fuzzing of every CPU kernel.
+#
+# rosnet parses no external data (docs/audit), so there is no byte-input fuzz
+# target. What can go wrong is a kernel computing the wrong thing at a shape or
+# value nobody tested — the vectorized bodies, odd tails, chunk edges, padding
+# windows that miss the input. Each round draws a random shape and random
+# inputs (normals mixed with ±0, subnormals, huge values and ±Inf; no NaN
+# inputs, whose payloads two orderings may legitimately pick differently) and
+# checks a property against the plain-loop oracles in tests/reference.cyr:
+#   - conv2d_fwd / conv2d_bwd (dx, dW, db) == the 1.2.1 loops, bit for bit
+#   - t_add_into / t_scale == the scalar loops, bit for bit
+#   - linear_fwd, linear_bwd (dx, dW, db) == the oracles, bit for bit where the
+#     packed multiply-add rounds twice (x86_64), within 1e-9 elsewhere
+#   - t_alloc(n) is non-null and zeroed for n in [0, 1000)
+# Seeded through tyche, so a failure reproduces exactly; the failing round and
+# seed are printed. Exit 0 = every property held.
+include "lib/tyche.cyr"
+include "src/tensor.cyr"
+include "src/linear.cyr"
+include "src/conv.cyr"
+include "tests/reference.cyr"
 
-fn fuzz_main(data, len) {
-    if (len == 0) { return 0; }
+var _fz_fail = 0;
+
+fn rnd_below(n): i64 {
+    if (n <= 1) { return 0; }
+    var r = rng_u64() >> 1;              # non-negative
+    return r % n;
+}
+
+# One f64 input: mostly N(0, 1), sometimes an edge value.
+fn rnd_val(): i64 {
+    var k = rnd_below(64);
+    if (k == 0) { return 0; }                                   # +0
+    if (k == 1) { return 0x8000000000000000; }                  # -0
+    if (k == 2) { return rnd_below(4503599627370496) + 1; }     # subnormal
+    if (k == 3) { return 0x7E37E43C8800759C; }                  # 1e300
+    if (k == 4) { return 0x7FF0000000000000; }                  # +Inf
+    if (k == 5) { return 0xFFF0000000000000; }                  # -Inf
+    return rng_normal();
+}
+
+fn rnd_fill(n): i64 {
+    var p = t_alloc(n);
+    var i = 0;
+    while (i < n) { store64(p + i * 8, rnd_val()); i = i + 1; }
+    return p;
+}
+
+fn fz_check(ok, round, what): i64 {
+    if (ok == 0) {
+        _fz_fail = _fz_fail + 1;
+        print("fuzz: FAIL round ", 17); fmt_int(round); print(": ", 2); println(what);
+    }
+    return 0;
+}
+
+fn fz_conv(round): i64 {
+    var N = 1 + rnd_below(2); var Cin = 1 + rnd_below(3); var Cout = 1 + rnd_below(3);
+    var KH = 1 + rnd_below(4); var KW = 1 + rnd_below(5);
+    var SH = 1 + rnd_below(3); var SW = 1 + rnd_below(3);
+    var PH = rnd_below(4); var PW = rnd_below(4);
+    var H = 1 + rnd_below(7); var W = 1 + rnd_below(12);
+    if (rnd_below(8) == 0) { H = 1 + rnd_below(2); W = 120 + rnd_below(200); SW = 1; }   # chunked rows
+    if (rnd_below(3) == 0) { SW = 1; }
+    var OH = conv2d_out_dim(H, KH, SH, PH); var OW = conv2d_out_dim(W, KW, SW, PW);
+    if (OH <= 0) { return 0; }
+    if (OW <= 0) { return 0; }
+    var nx = N * Cin * H * W; var nw = Cout * Cin * KH * KW; var ny = N * Cout * OH * OW;
+    var x = rnd_fill(nx); var Wf = rnd_fill(nw); var dy = rnd_fill(ny);
+    var b = 0; var db = 0; var rdb = 0; var dx = 0; var rdx = 0;
+    if (rnd_below(4) != 0) { b = rnd_fill(Cout); db = rnd_fill(Cout); rdb = t_alloc(Cout); t_copy(rdb, db, Cout); }
+    if (rnd_below(4) != 0) { dx = t_alloc(nx); rdx = t_alloc(nx); }
+    var y = t_alloc(ny); var ry = t_alloc(ny);
+    conv2d_fwd(x, Wf, b, y, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+    ref_conv2d_fwd(x, Wf, b, ry, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+    fz_check(bits_diff(y, ry, ny) == 0, round, "conv2d_fwd != 1.2.1 loops");
+    var dW = rnd_fill(nw); var rdW = t_alloc(nw); t_copy(rdW, dW, nw);
+    conv2d_bwd(x, Wf, dy, dx, dW, db, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+    ref_conv2d_bwd(x, Wf, dy, rdx, rdW, rdb, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+    fz_check(bits_diff(dW, rdW, nw) == 0, round, "conv2d_bwd dW != 1.2.1 loops");
+    if (dx != 0) { fz_check(bits_diff(dx, rdx, nx) == 0, round, "conv2d_bwd dx != 1.2.1 loops"); }
+    if (db != 0) { fz_check(bits_diff(db, rdb, Cout) == 0, round, "conv2d_bwd db != 1.2.1 loops"); }
+    return 0;
+}
+
+fn fz_blas1(round): i64 {
+    var n = rnd_below(66);
+    var a = rnd_fill(n); var b = rnd_fill(n); var s = rnd_val();
+    var ra = t_alloc(n); t_copy(ra, a, n);
+    t_add_into(a, b, n);
+    t_scale(a, n, s);
+    var i = 0;
+    while (i < n) {
+        store64(ra + i * 8, f64_mul(f64_add(load64(ra + i * 8), load64(b + i * 8)), s));
+        i = i + 1;
+    }
+    fz_check(bits_diff(a, ra, n) == 0, round, "t_add_into / t_scale != scalar loops");
+    var z = rnd_below(1000);
+    var p = t_alloc(z);
+    var nz = 0;
+    i = 0;
+    while (i < z) { if (load64(p + i * 8) != 0) { nz = nz + 1; } i = i + 1; }
+    fz_check((p != 0) & (nz == 0), round, "t_alloc not a zeroed block");
+    return 0;
+}
+
+# linear on finite inputs only: the tolerance comparison off x86_64 needs them.
+fn rnd_fill_normal(n): i64 {
+    var p = t_alloc(n);
+    t_randn(p, n, f64_from(1));
+    return p;
+}
+
+fn fz_linear(round): i64 {
+    var M = 1 + rnd_below(5); var K = rnd_below(12); var N = 1 + rnd_below(14);
+    var x = rnd_fill_normal(M * K); var W = rnd_fill_normal(K * N); var dy = rnd_fill_normal(M * N);
+    var b = 0; var db = 0; var rdb = 0;
+    if (rnd_below(3) != 0) { b = rnd_fill_normal(N); db = t_alloc(N); rdb = t_alloc(N); }
+    var y = t_alloc(M * N); var ry = t_alloc(M * N);
+    linear_fwd(x, W, b, y, M, K, N);
+    ref_linear_fwd(x, W, b, ry, M, K, N);
+    var dx = t_alloc(M * K); var rdx = t_alloc(M * K);
+    var dW = t_alloc(K * N); var rdW = t_alloc(K * N);
+    linear_bwd(x, W, dy, dx, dW, db, M, K, N);
+    ref_linear_dx(W, dy, rdx, M, K, N);
+    ref_linear_bwd_params(x, dy, rdW, rdb, M, K, N);
+    if (_packed_fma_exact() == 1) {
+        fz_check(bits_diff(y, ry, M * N) == 0, round, "linear_fwd != oracle");
+        fz_check(bits_diff(dx, rdx, M * K) == 0, round, "linear_bwd dx != oracle");
+        fz_check(bits_diff(dW, rdW, K * N) == 0, round, "linear_bwd dW != oracle");
+    } else {
+        var tol = f64_div(f64_from(1), f64_from(1000000000));
+        fz_check(f64_gt(max_relerr(y, ry, M * N), tol) == 0, round, "linear_fwd vs oracle");
+        fz_check(f64_gt(max_relerr(dx, rdx, M * K), tol) == 0, round, "linear_bwd dx vs oracle");
+        fz_check(f64_gt(max_relerr(dW, rdW, K * N), tol) == 0, round, "linear_bwd dW vs oracle");
+    }
+    if (db != 0) { fz_check(bits_diff(db, rdb, N) == 0, round, "linear_bwd db != oracle"); }
     return 0;
 }
 
 fn main() {
     alloc_init();
-    fuzz_main("test", 4);
-    println("fuzz: ok");
+    var seed = 20261109;
+    rng_seed(seed);
+    var rounds = 15000;
+    var r = 0;
+    while (r < rounds) {
+        fz_conv(r);
+        fz_blas1(r);
+        fz_linear(r);
+        r = r + 1;
+    }
+    if (_fz_fail != 0) {
+        print("fuzz: ", 6); fmt_int(_fz_fail); print(" failures (seed ", 16); fmt_int(seed); println(")");
+        return 1;
+    }
+    print("fuzz: ok (", 10); fmt_int(rounds); println(" rounds x 3 properties)");
     return 0;
 }
 
 var r = main();
-syscall(60, r);
+syscall(SYS_EXIT, r);

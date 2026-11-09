@@ -9,6 +9,7 @@ include "lib/tyche.cyr"
 include "src/tensor.cyr"
 include "src/linear.cyr"
 include "src/conv.cyr"
+include "tests/reference.cyr"
 
 fn _eps(): i64 { return f64_div(f64_from(1), f64_from(10000)); }     # 1e-4
 
@@ -120,13 +121,13 @@ fn main() {
     test_group("blas1");
     var v = t_alloc(4);
     t_fill(v, 4, f64_from(2));                  # [2,2,2,2]
-    assert(t_sum(v, 4) == f64_from(8), "t_sum after fill");
+    assert_eq(t_sum(v, 4), f64_from(8), "t_sum after fill");
     t_scale(v, 4, f64_from(3));                 # [6,6,6,6]
-    assert(t_sum(v, 4) == f64_from(24), "t_scale x3");
+    assert_eq(t_sum(v, 4), f64_from(24), "t_scale x3");
     var w = t_alloc(4);
     t_fill(w, 4, f64_from(1));
     t_axpy(v, w, f64_from(2), 4);               # v += 2*w -> [8,8,8,8]
-    assert(t_sum(v, 4) == f64_from(32), "t_axpy a=2");
+    assert_eq(t_sum(v, 4), f64_from(32), "t_axpy a=2");
     assert(f64_is_finite(f64_from(1)) == 1, "finite ok");
 
     # ---- linear: analytic backward vs central finite differences ----
@@ -176,19 +177,19 @@ fn main() {
     var cy = t_alloc(4);
     conv2d_fwd(cx, cw, cb, cy, 1, 1, 2, 2, 1, 1, 1, 1, 1, 0, 0);
     assert(cy != 0, "conv fwd ran");
-    assert(load64(cy) == f64_from(7), "1x1 conv: y = 2*3 + 1");
-    assert(t_sum(cy, 4) == f64_from(28), "1x1 conv: all four outputs");
+    assert_eq(load64(cy), f64_from(7), "1x1 conv: y = 2*3 + 1");
+    assert_eq(t_sum(cy, 4), f64_from(28), "1x1 conv: all four outputs");
     # 2x2 all-ones kernel on all-ones 3x3 input, no pad: each output = 4
     var sx = t_alloc(9); t_fill(sx, 9, f64_from(1));
     var sw = t_alloc(4); t_fill(sw, 4, f64_from(1));
     var sy = t_alloc(4);
     conv2d_fwd(sx, sw, 0, sy, 1, 1, 3, 3, 1, 2, 2, 1, 1, 0, 0);
-    assert(t_sum(sy, 4) == f64_from(16), "2x2 sum kernel: 4 outputs of 4");
+    assert_eq(t_sum(sy, 4), f64_from(16), "2x2 sum kernel: 4 outputs of 4");
     # padding: same 2x2 kernel with P=1 -> OH=OW=4; corners see 1 input cell
     var py = t_alloc(16);
     conv2d_fwd(sx, sw, 0, py, 1, 1, 3, 3, 1, 2, 2, 1, 1, 1, 1);
-    assert(load64(py) == f64_from(1), "padded corner sees one cell");
-    assert(t_sum(py, 16) == f64_from(36), "padded conv total = 9 cells x 4 taps");
+    assert_eq(load64(py), f64_from(1), "padded corner sees one cell");
+    assert_eq(t_sum(py, 16), f64_from(36), "padded conv total = 9 cells x 4 taps");
 
     test_group("conv grad-check");
     conv_fd_case("conv 3x3", 2, 2, 5, 5, 3, 3, 3, 1, 1, 0, 0);
@@ -206,9 +207,122 @@ fn main() {
     var pd = 0; var pi = 0;
     while (pi < OL) { if (load64(y1 + pi * 8) != load64(y2 + pi * 8)) { pd = pd + 1; } pi = pi + 1; }
     assert(pd == 0, "conv1d == conv2d(H=1) bit-identical");
+    # and the backward wrapper (conv1d_bwd had no test before 1.2.2)
+    var l1dy = t_alloc(OL); t_randn(l1dy, OL, f64_from(1));
+    var a_dx = t_alloc(8); var a_dw = t_alloc(3); var a_db = t_alloc(1);
+    var b_dx = t_alloc(8); var b_dw = t_alloc(3); var b_db = t_alloc(1);
+    conv1d_bwd(l1x, l1w, l1dy, a_dx, a_dw, a_db, 1, 1, 8, 1, 3, 2, 1);
+    conv2d_bwd(l1x, l1w, l1dy, b_dx, b_dw, b_db, 1, 1, 1, 8, 1, 1, 3, 1, 2, 0, 1);
+    assert((bits_diff(a_dx, b_dx, 8) + bits_diff(a_dw, b_dw, 3) + bits_diff(a_db, b_db, 1)) == 0,
+      "conv1d_bwd == conv2d_bwd(H=1) bit-identical");
+
+    test_group("tensor storage");
+    var z0 = t_alloc(0); var z1 = t_alloc(0);
+    assert(z0 != 0, "t_alloc(0) is a valid pointer (it exited before 1.2.2)");
+    assert(z0 != z1, "t_alloc(0) pointers are distinct");
+    assert_eq(load64(z0), 0, "t_alloc(0) slot is zeroed");
+    var st = t_alloc(5);
+    tset(st, 3, ff(9));
+    assert_eq(tget(st, 3), f64_from(9), "tset / tget round-trip");
+    assert_eq(tget(st, 2), 0, "t_alloc zero-fills");
+    t_fill(st, 5, ff(4));
+    assert_eq(t_sum(st, 5), f64_from(20), "t_fill");
+    var st2 = t_alloc(6); t_fill(st2, 6, ff(7));
+    t_copy(st2, st, 5);
+    assert_eq(t_sum(st2, 6), f64_from(27), "t_copy copies n, not n+1");
+    t_zero(st2, 5);
+    assert_eq(t_sum(st2, 6), f64_from(7), "t_zero zeroes n, not n+1");
+
+    test_group("BLAS-1 packed body + odd tail");
+    blas1_case(7); blas1_case(8); blas1_case(1); blas1_case(0);
+
+    test_group("linear vs reference");
+    linear_ref_case("3x5x7", 3, 5, 7, 1);
+    linear_ref_case("2x6x8", 2, 6, 8, 1);
+    linear_ref_case("1x1x1", 1, 1, 1, 1);
+    linear_ref_case("2x9x13", 2, 9, 13, 1);
+    linear_ref_case("4x0x5 (K = 0: y = b)", 4, 0, 5, 1);
+    linear_ref_case("3x4x6 no bias", 3, 4, 6, 0);
+
+    test_group("conv fast paths vs 1.2.1 loops");
+    conv_ref_case("3x3 pad 1", 2, 3, 6, 7, 4, 3, 3, 1, 1, 1, 1, 1);
+    conv_ref_case("row of 300 (3 chunks)", 1, 2, 2, 300, 2, 1, 3, 1, 1, 0, 1, 1);
+    conv_ref_case("row of 257, kernel 5", 1, 1, 3, 257, 2, 3, 5, 2, 1, 1, 2, 1);
+    conv_ref_case("pad > kernel", 1, 2, 3, 3, 2, 2, 2, 1, 1, 3, 3, 1);
+    conv_ref_case("input smaller than kernel", 2, 2, 2, 3, 2, 3, 3, 1, 1, 1, 1, 1);
+    conv_ref_case("strided SW = 2 (general path)", 1, 2, 7, 9, 3, 3, 2, 2, 2, 1, 0, 1);
+    conv_ref_case("no bias, no dx, no db", 1, 3, 5, 6, 2, 2, 3, 1, 1, 0, 1, 0);
 
     return assert_summary();
 }
 
+# t_scale / t_add_into at length n: integer-valued, so the expected bits are exact.
+fn blas1_case(n): i64 {
+    var a = t_alloc(n); var b = t_alloc(n);
+    var i = 0;
+    while (i < n) { tset(a, i, ff(i + 1)); tset(b, i, ff(2 * i)); i = i + 1; }
+    t_add_into(a, b, n);            # a[i] = 3i + 1
+    t_scale(a, n, ff(2));           # a[i] = 6i + 2
+    var bad = 0;
+    i = 0;
+    while (i < n) { if (tget(a, i) != ff(6 * i + 2)) { bad = bad + 1; } i = i + 1; }
+    assert(bad == 0, "t_add_into + t_scale exact over every element");
+    return 0;
+}
+
+# linear_fwd and linear_bwd's dW / db against the scalar oracle. Bit-identical
+# where the packed multiply-add rounds twice (x86_64); within 1e-12 elsewhere.
+fn linear_ref_case(name, M, K, N, with_bias): i64 {
+    var x = t_alloc(M * K); var W = t_alloc(K * N); var dy = t_alloc(M * N);
+    t_randn(x, M * K, f64_from(1)); t_randn(W, K * N, f64_from(1)); t_randn(dy, M * N, f64_from(1));
+    var b = 0;
+    if (with_bias == 1) { b = t_alloc(N); t_randn(b, N, f64_from(1)); }
+    var y = t_alloc(M * N); var ry = t_alloc(M * N);
+    linear_fwd(x, W, b, y, M, K, N);
+    ref_linear_fwd(x, W, b, ry, M, K, N);
+    var dx = t_alloc(M * K); var dW = t_alloc(K * N); var rdW = t_alloc(K * N);
+    var db = 0; var rdb = 0;
+    if (with_bias == 1) { db = t_alloc(N); rdb = t_alloc(N); }
+    linear_bwd(x, W, dy, dx, dW, db, M, K, N);
+    ref_linear_bwd_params(x, dy, rdW, rdb, M, K, N);
+    var nb = 0;
+    if (with_bias == 1) { nb = N; }
+    if (_packed_fma_exact() == 1) {
+        assert((bits_diff(y, ry, M * N) + bits_diff(dW, rdW, K * N)) == 0, name);
+    } else {
+        var tol = f64_div(f64_from(1), f64_from(1000000000000));
+        assert(f64_gt(max_relerr(y, ry, M * N), tol) == 0, name);
+        assert(f64_gt(max_relerr(dW, rdW, K * N), tol) == 0, name);
+    }
+    if (with_bias == 1) { assert(bits_diff(db, rdb, nb) == 0, name); }
+    return 0;
+}
+
+# conv2d_fwd / conv2d_bwd against the 1.2.1 loops (tests/reference.cyr): the
+# 1.2.2 kernels add into every output in the same order, so bit-identical on
+# every target. full = 0 passes b = 0, dx = 0, db = 0.
+fn conv_ref_case(name, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW, full): i64 {
+    var OH = conv2d_out_dim(H, KH, SH, PH); var OW = conv2d_out_dim(W, KW, SW, PW);
+    var nx = N * Cin * H * W; var nw = Cout * Cin * KH * KW; var ny = N * Cout * OH * OW;
+    var x = t_alloc(nx); var Wf = t_alloc(nw); var dy = t_alloc(ny);
+    t_randn(x, nx, f64_from(1)); t_randn(Wf, nw, f64_from(1)); t_randn(dy, ny, f64_from(1));
+    var b = 0; var dx = 0; var rdx = 0; var db = 0; var rdb = 0;
+    if (full == 1) {
+        b = t_alloc(Cout); t_randn(b, Cout, f64_from(1));
+        dx = t_alloc(nx); rdx = t_alloc(nx); db = t_alloc(Cout); rdb = t_alloc(Cout);
+    }
+    var y = t_alloc(ny); var ry = t_alloc(ny);
+    conv2d_fwd(x, Wf, b, y, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+    ref_conv2d_fwd(x, Wf, b, ry, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+    var dW = t_alloc(nw); var rdW = t_alloc(nw);
+    t_randn(dW, nw, f64_from(1)); t_copy(rdW, dW, nw);      # dW accumulates
+    conv2d_bwd(x, Wf, dy, dx, dW, db, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+    ref_conv2d_bwd(x, Wf, dy, rdx, rdW, rdb, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW);
+    var d = bits_diff(y, ry, ny) + bits_diff(dW, rdW, nw);
+    if (full == 1) { d = d + bits_diff(dx, rdx, nx) + bits_diff(db, rdb, Cout); }
+    assert(d == 0, name);
+    return 0;
+}
+
 var exit_code = main();
-syscall(60, exit_code);
+syscall(SYS_EXIT, exit_code);

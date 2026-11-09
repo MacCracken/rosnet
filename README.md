@@ -20,7 +20,7 @@ bit patterns carried in `i64`); shapes live in the caller. Extracted from
 
 **BLAS-3 (matmul + gradient)** — pure linear algebra, validated against central
 finite differences:
-- `linear_fwd(x, W, b, y, M, K, N)` — `y(M,N) = x(M,K) · W(K,N) [+ b(N)]`, 4-wide SIMD.
+- `linear_fwd(x, W, b, y, M, K, N)` — `y(M,N) = x(M,K) · W(K,N) [+ b(N)]`, a packed (SIMD) AXPY per row.
 - `linear_bwd(x, W, dy, dx, dW, db, M, K, N)` — writes `dx`, accumulates `dW`/`db` (`dx = dy·Wᵀ`, `dW = xᵀ·dy`). `b`/`db == 0` means "no bias".
 
 **Convolution (1.1)** — `conv2d_fwd`/`conv2d_bwd` (NCHW, per-axis stride +
@@ -63,9 +63,11 @@ NVIDIA) evolves under mabda without touching this API.
 
 - [`docs/api.md`](docs/api.md) — the **frozen 1.x public surface** (CPU + GPU)
   and the memory contract.
-- [`docs/benchmarks.md`](docs/benchmarks.md) — the v1.0 numbers, read honestly.
+- [`docs/benchmarks.md`](docs/benchmarks.md) — the numbers (1.2.1 → 1.2.2), read honestly.
 - [`docs/audit/2026-07-04-audit.md`](docs/audit/2026-07-04-audit.md) — the v1.0
   hardening audit (the no-bounds-checks substrate contract, audited).
+- [`docs/audit/2026-11-09-audit.md`](docs/audit/2026-11-09-audit.md) — the 1.2.2
+  P(-1) hardening / optimization / repair sweep.
 - [`docs/adr/0001-adopt-gpu-backend.md`](docs/adr/0001-adopt-gpu-backend.md) —
   why GPU is a separate profile.
 
@@ -85,8 +87,10 @@ Then `cyrius deps` and `include "lib/rosnet.cyr"`.
 ```sh
 cyrius deps                                # resolve tyche + stdlib
 cyrius build src/main.cyr build/rosnet     # compile the smoke demo
-cyrius test tests                          # grad-checks + BLAS-1 (tests/*.tcyr)
-cyrius distlib                             # regenerate dist/rosnet.cyr
+cyrius test tests                          # grad-checks, oracles, GPU host checks (tests/*.tcyr)
+CYRIUS_DCE=1 cyrius build tests/rosnet.fcyr build/fuzz && ./build/fuzz   # property fuzz
+./scripts/bench-history.sh                 # benchmarks → bench-history.csv
+cyrius distlib --all                       # regenerate dist/rosnet.cyr + dist/rosnet-gpu.cyr
 ```
 
 ## License

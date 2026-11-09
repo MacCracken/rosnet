@@ -45,9 +45,13 @@
   benched. Opens the modality axis (sight proof next) AND Type-4 diffusion.
 - **IEEE-754 wideners** (f32/f16/bf16→f64) — promotion candidate from
   anukūlana's importer on a second consumer (GGUF parser / another importer).
-- **CPU matmul optimization** (blocking/tiling/threads) — the known ~1–2-order
-  gap vs tuned BLAS (see benchmarks.md); open when a consumer is
-  throughput-blocked rather than on principle.
+- **CPU kernel optimization** — 1.2.2 (P(-1) sweep) took the bit-identical
+  wins: `linear_fwd` / dW as one packed AXPY per row (2.2–2.7×), stride-1 conv
+  along the output row (fwd 8–13×, bwd 3–3.6×), packed `t_scale` /
+  `t_add_into`. What remains changes bits or the bundle's leaves, so it waits
+  for a consumer that is throughput-blocked: blocking/tiling, threads, AVX2
+  (`f64v256_*` behind a runtime CPU check), a wider dx reduction, im2col for
+  strided conv.
 - **Quantized dtypes** — steps outside the caller-guarantees contract; must
   bounds-check like tula/anukūlana parsers (see the audit's standing guidance).
 

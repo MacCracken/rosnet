@@ -3,6 +3,7 @@
 
 include "lib/syscalls.cyr"
 
+# Top-level test entry ([build].test); the suites live in tests/*.tcyr.
 fn main() {
     return 0;
 }

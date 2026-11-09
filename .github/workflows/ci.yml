@@ -11,12 +11,24 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+# Read-only token. Nothing here writes to the repository, and when release.yml
+# calls this workflow the called side can only lower the caller's permissions,
+# so the CI gate never holds the release job's contents: write.
+permissions:
+  contents: read
+
 jobs:
   build:
     name: Build & Test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      # Third-party actions are pinned to a full commit SHA (a tag can be moved);
+      # the comment names the release the SHA was taken from. persist-credentials
+      # false keeps the token out of .git/config, where the curl | sh installer
+      # below could read it.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Install Cyrius toolchain
         # The toolchain version is the cyrius.cyml [package].cyrius pin — the
@@ -40,24 +52,28 @@ jobs:
 
       - name: Format check
         run: |
-          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr; do
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr tests/*.cyr; do
             cyrius fmt "$f" --check
           done
 
       - name: Lint
-        # Hard gate on warnings; only the cosmetic "exceeds 120 characters"
-        # class is tolerated (same policy as sigil's long hex-table lines).
+        # Hard gate: any warning fails, in src/ and tests/ (1.2.2). The old gate
+        # linted src/ only and let "exceeds 120 characters" through.
         run: |
           fail=0
-          for f in src/*.cyr; do
+          for f in src/*.cyr tests/*.tcyr tests/*.bcyr tests/*.fcyr tests/*.cyr; do
             out=$(cyrius lint "$f" 2>&1 || true)
             echo "$out"
-            bad=$(echo "$out" | grep -E '^[[:space:]]*warn ' | grep -v 'exceeds 120 characters' || true)
-            if [ -n "$bad" ]; then
-              echo "lint: non-cosmetic warnings in $f"; fail=1
+            if echo "$out" | grep -qE '^[[:space:]]*(warn|error) '; then
+              echo "lint: warnings in $f"; fail=1
             fi
           done
-          [ $fail -eq 0 ] || { echo "lint: non-cosmetic warnings present"; exit 1; }
+          [ $fail -eq 0 ] || { echo "lint: warnings present"; exit 1; }
+
+      - name: Vet
+        # cyaudit vet: every file the smoke entry includes resolves, and none is
+        # untrusted. Exits 1 on a finding.
+        run: cyrius vet src/main.cyr
 
       - name: Build smoke
         run: |
@@ -72,11 +88,14 @@ jobs:
         run: ./build/rosnet
 
       - name: Tests
-        # `cyrius test tests` recursively runs tests/*.tcyr — rosnet's
-        # correctness gate (tests/rosnet.tcyr): exact BLAS-1 ops + CENTRAL
-        # finite-difference grad-checks of linear_bwd (dx/dW/db < 1e-5),
-        # ported from attn11. cyrius 6.7.6 deprecated the plural `cyrius tests`
-        # (it warns) and 6.7.12 removes it.
+        # `cyrius test tests` recursively runs tests/*.tcyr. tests/rosnet.tcyr is
+        # the CPU correctness gate: exact BLAS-1 ops, CENTRAL finite-difference
+        # grad-checks of linear_bwd / conv2d_bwd, and the optimized kernels
+        # against the plain-loop oracles in tests/reference.cyr (bit-identical).
+        # tests/gpu_host.tcyr checks the GPU profile's host side — shader-cache
+        # bookkeeping, key fields, and every SPIR-V builder fitting its buffer —
+        # which needs no device. cyrius 6.7.6 deprecated the plural
+        # `cyrius tests` (it warns) and 6.7.12 removes it.
         run: cyrius test tests
 
       - name: Benchmarks
@@ -86,25 +105,30 @@ jobs:
         run: |
           mkdir -p build
           CYRIUS_DCE=1 cyrius build tests/rosnet.fcyr build/rosnet-fuzz
-          timeout 30 ./build/rosnet-fuzz || { echo "FUZZ CRASH"; exit 1; }
+          # deterministic property fuzzing (seeded); exit 1 = a property failed
+          timeout 60 ./build/rosnet-fuzz || { echo "FUZZ: property failure, crash or timeout"; exit 1; }
 
       - name: distlib drift check
         # rosnet is a LIBRARY: consumers import dist/rosnet.cyr (the [lib]
-        # bundle), not src/. Regenerate and fail if the committed bundle is
-        # stale, so a release can never ship a dist/ that lags src/. `cyrius
-        # distlib` is byte-deterministic, so `git diff --exit-code` is a valid
-        # sync gate. (The bundle leaves tyche's rng_normal unresolved by design —
-        # consumers supply it via their own [deps.tyche].)
+        # bundle) and dist/rosnet-gpu.cyr (the [lib.gpu] profile), not src/.
+        # Regenerate BOTH (--all = base + every [lib.X]; a bare `cyrius distlib`
+        # rebuilds only the base, so before 1.2.2 a stale GPU bundle passed) and
+        # fail if dist/ — bundles and .deps sidecars — differs from the commit.
+        # distlib is byte-deterministic, so `git diff --exit-code` is a valid
+        # sync gate. (The CPU bundle leaves tyche's rng_normal unresolved by
+        # design — consumers supply it via their own [deps.tyche].)
         run: |
-          cyrius distlib
+          cyrius distlib --all
           git diff --exit-code dist/ \
-            || { echo "FAIL: dist/rosnet.cyr is stale — run 'cyrius distlib' and commit."; exit 1; }
+            || { echo "FAIL: dist/ is stale — run 'cyrius distlib --all' and commit."; exit 1; }
 
   security:
     name: Security Scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Scan for dangerous patterns
         # Informational. rosnet is pure arithmetic — no process/path/exec
         # surface — so these never fire today; kept for parity with sibling lib
@@ -122,7 +146,9 @@ jobs:
     name: Documentation
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - name: Check required docs
         # Only files that exist in rosnet are gated — gating an absent file would
         # falsely red the build. dist/rosnet.cyr is required: it is the shipped

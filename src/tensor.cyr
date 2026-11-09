@@ -13,36 +13,58 @@ fn ff(n): i64 { return f64_from(n); }
 # ---- element access --------------------------------------------------------
 # A tensor is a raw pointer; element i is an f64 bit pattern at p + i*8.
 fn tget(p, i): i64 { return load64(p + i * 8); }
+# Store the f64 bit pattern v as element i of p.
 fn tset(p, i, v): i64 { store64(p + i * 8, v); return 0; }
 
 # ---- allocation ------------------------------------------------------------
+# Print "rosnet: t_alloc: <why> <n>" to stderr and exit 1. t_alloc never
+# returns 0: a null tensor would turn into pointer arithmetic from address 0.
+fn _t_alloc_fail(why, n): i64 {
+    var pre = "rosnet: t_alloc: ";
+    sys_write(2, pre, strlen(pre));
+    sys_write(2, why, strlen(why));
+    fmt_int_fd(2, n);
+    sys_write(2, "\n", 1);
+    sys_exit(1);
+    return 0;
+}
+
 # Allocate n f64 elements, zero-initialised (alloc returns zeroed pages, but be
-# explicit so callers can rely on it after reuse). alloc() returns 0 past the
-# allocator's cap — abort cleanly instead of zero-filling from address 0.
+# explicit so callers can rely on it after reuse). Fail-loud, never null:
+#   n < 0, or n * 8 past 2^63 (it would wrap to a small size and the zero-fill
+#   would run off the block)   -> "invalid size", exit 1
+#   alloc() returns 0 (past the allocator's cap / out of memory) -> exit 1
+#   n == 0 -> a valid, distinct pointer to one zeroed slot (an empty tensor;
+#   every op given n = 0 touches no element). Before 1.2.2 alloc(0) returned 0
+#   and t_alloc(0) exited as "out of memory".
 fn t_alloc(n): i64 {
-    var p = alloc(n * 8);
-    if (p == 0) {
-        println("rosnet: t_alloc failed -- out of memory, requested f64s:");
-        fmt_int(n);
-        sys_exit(1);
-    }
+    if (n < 0) { _t_alloc_fail("invalid size, f64s: ", n); }
+    if (n > 1152921504606846975) { _t_alloc_fail("invalid size, f64s: ", n); }   # 2^60 - 1
+    var slots = n;
+    if (slots == 0) { slots = 1; }
+    var p = alloc(slots * 8);
+    if (p == 0) { _t_alloc_fail("out of memory, f64s: ", n); }
     var i = 0;
-    while (i < n) { store64(p + i * 8, 0); i = i + 1; }
+    while (i < slots) { store64(p + i * 8, 0); i = i + 1; }
     return p;
 }
 
+# p[0..n) = +0.0 (all-zero bits).
 fn t_zero(p, n): i64 {
     var i = 0;
     while (i < n) { store64(p + i * 8, 0); i = i + 1; }
     return 0;
 }
 
+# p[0..n) = v (an f64 bit pattern).
 fn t_fill(p, n, v): i64 {
     var i = 0;
     while (i < n) { store64(p + i * 8, v); i = i + 1; }
     return 0;
 }
 
+# dst[0..n) = src[0..n), bit for bit (NaN payloads included). Forward order:
+# for overlapping ranges only dst <= src is safe.
 fn t_copy(dst, src, n): i64 {
     var i = 0;
     while (i < n) { store64(dst + i * 8, load64(src + i * 8)); i = i + 1; }
@@ -62,8 +84,15 @@ fn t_axpy(dst, src, a, n): i64 {
 }
 
 # dst[i] += src[i]
+# Packed over the even prefix: f64v_add is one addpd / fadd per element on every
+# target (a single rounding, as f64_add), so the result is bit-identical to the
+# scalar loop wherever the split falls. The f64v builtins have no scalar tail —
+# they write whole 2-lane pairs — so the count passed is even and the odd last
+# element is added alone.
 fn t_add_into(dst, src, n): i64 {
-    var i = 0;
+    var n2 = n - (n % 2);
+    f64v_add(dst, dst, src, n2);
+    var i = n2;
     while (i < n) {
         store64(dst + i * 8, f64_add(load64(dst + i * 8), load64(src + i * 8)));
         i = i + 1;
@@ -72,8 +101,12 @@ fn t_add_into(dst, src, n): i64 {
 }
 
 # dst[i] *= s
+# Packed over the even prefix like t_add_into: f64v_scale is one mulpd / fmul
+# per element on every target, so the result is bit-identical to f64_mul.
 fn t_scale(dst, n, s): i64 {
-    var i = 0;
+    var n2 = n - (n % 2);
+    f64v_scale(dst, dst, s, n2);
+    var i = n2;
     while (i < n) {
         store64(dst + i * 8, f64_mul(load64(dst + i * 8), s));
         i = i + 1;

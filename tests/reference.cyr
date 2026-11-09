@@ -1,0 +1,236 @@
+# rosnet test oracles — the plain nested-loop forms of the optimized kernels.
+#
+# Shared by tests/rosnet.tcyr and tests/rosnet.fcyr (include after src/). The
+# conv references are the 1.2.1 conv2d_fwd / conv2d_bwd loops verbatim: the
+# 1.2.2 kernels restructure and vectorize those loops but must add into every
+# output in the same order, so on every target they must agree bit for bit
+# (the one documented exception: a NaN made from two NaN operands may carry
+# the other operand's payload). The linear reference is the scalar
+# multiply-then-add AXPY that linear_fwd's vector body reproduces exactly on
+# x86_64 (mulpd + addpd); aarch64 fuses the packed multiply-add, so there the
+# agreement is within rounding — see _packed_fma_exact.
+
+# 1 where the packed multiply-add rounds twice like the scalar code (x86_64:
+# f64v_axpy / f64v_fmadd lower to mulpd + addpd). aarch64 lowers them to a fused
+# FMLA, one rounding, so linear's vector body differs there in the last bits.
+fn _packed_fma_exact(): i64 {
+    #ifdef CYRIUS_ARCH_X86
+    return 1;
+    #endif
+    return 0;
+}
+
+# y(M,N) = x(M,K) @ W(K,N) [+ b], accumulated over k in order: y = b, then
+# y += x[m,k] * W[k,n] for k = 0..K-1.
+fn ref_linear_fwd(x, W, b, y, M, K, N): i64 {
+    var m = 0;
+    while (m < M) {
+        var n = 0;
+        while (n < N) {
+            var acc = f64_from(0);
+            if (b != 0) { acc = load64(b + n * 8); }
+            var k = 0;
+            while (k < K) {
+                acc = f64_add(acc, f64_mul(load64(x + (m * K + k) * 8), load64(W + (k * N + n) * 8)));
+                k = k + 1;
+            }
+            store64(y + (m * N + n) * 8, acc);
+            n = n + 1;
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# dW(K,N) += x^T dy over m in order; db(N) += column sums of dy (summed from 0
+# first, then added — linear_bwd's order).
+fn ref_linear_bwd_params(x, dy, dW, db, M, K, N): i64 {
+    var k = 0;
+    while (k < K) {
+        var n = 0;
+        while (n < N) {
+            var m = 0;
+            while (m < M) {
+                var i = (k * N + n) * 8;
+                store64(dW + i, f64_add(load64(dW + i),
+                    f64_mul(load64(x + (m * K + k) * 8), load64(dy + (m * N + n) * 8))));
+                m = m + 1;
+            }
+            n = n + 1;
+        }
+        k = k + 1;
+    }
+    if (db != 0) {
+        var nb = 0;
+        while (nb < N) {
+            var s = f64_from(0);
+            var mm = 0;
+            while (mm < M) { s = f64_add(s, load64(dy + (mm * N + nb) * 8)); mm = mm + 1; }
+            store64(db + nb * 8, f64_add(load64(db + nb * 8), s));
+            nb = nb + 1;
+        }
+    }
+    return 0;
+}
+
+fn ref_conv2d_fwd(x, Wf, b, y, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW): i64 {
+    var OH = conv2d_out_dim(H, KH, SH, PH);
+    var OW = conv2d_out_dim(W, KW, SW, PW);
+    var n = 0;
+    while (n < N) {
+        var co = 0;
+        while (co < Cout) {
+            var oh = 0;
+            while (oh < OH) {
+                var ow = 0;
+                while (ow < OW) {
+                    var acc = f64_from(0);
+                    if (b != 0) { acc = load64(b + co * 8); }
+                    var ci = 0;
+                    while (ci < Cin) {
+                        var kh = 0;
+                        while (kh < KH) {
+                            var ih = oh * SH - PH + kh;
+                            if (ih >= 0) { if (ih < H) {
+                                    var kw = 0;
+                                    while (kw < KW) {
+                                        var iw = ow * SW - PW + kw;
+                                        if (iw >= 0) { if (iw < W) {
+                                                var xv = load64(x + (((n * Cin + ci) * H + ih) * W + iw) * 8);
+                                                var wv = load64(Wf + (((co * Cin + ci) * KH + kh) * KW + kw) * 8);
+                                                acc = f64_add(acc, f64_mul(xv, wv));
+                                            } }
+                                        kw = kw + 1;
+                                    }
+                                } }
+                            kh = kh + 1;
+                        }
+                        ci = ci + 1;
+                    }
+                    store64(y + (((n * Cout + co) * OH + oh) * OW + ow) * 8, acc);
+                    ow = ow + 1;
+                }
+                oh = oh + 1;
+            }
+            co = co + 1;
+        }
+        n = n + 1;
+    }
+    return 0;
+}
+
+fn ref_conv2d_bwd(x, Wf, dy, dx, dW, db, N, Cin, H, W, Cout, KH, KW, SH, SW, PH, PW): i64 {
+    var OH = conv2d_out_dim(H, KH, SH, PH);
+    var OW = conv2d_out_dim(W, KW, SW, PW);
+    if (dx != 0) { t_zero(dx, N * Cin * H * W); }
+    var n = 0;
+    while (n < N) {
+        var co = 0;
+        while (co < Cout) {
+            var oh = 0;
+            while (oh < OH) {
+                var ow = 0;
+                while (ow < OW) {
+                    var g = load64(dy + (((n * Cout + co) * OH + oh) * OW + ow) * 8);
+                    if (db != 0) {
+                        store64(db + co * 8, f64_add(load64(db + co * 8), g));
+                    }
+                    var ci = 0;
+                    while (ci < Cin) {
+                        var kh = 0;
+                        while (kh < KH) {
+                            var ih = oh * SH - PH + kh;
+                            if (ih >= 0) { if (ih < H) {
+                                    var kw = 0;
+                                    while (kw < KW) {
+                                        var iw = ow * SW - PW + kw;
+                                        if (iw >= 0) { if (iw < W) {
+                                                var xi = (((n * Cin + ci) * H + ih) * W + iw) * 8;
+                                                var wi = (((co * Cin + ci) * KH + kh) * KW + kw) * 8;
+                                                store64(dW + wi,
+                                                  f64_add(load64(dW + wi), f64_mul(load64(x + xi), g)));
+                                                if (dx != 0) {
+                                                    store64(dx + xi,
+                                                      f64_add(load64(dx + xi), f64_mul(load64(Wf + wi), g)));
+                                                }
+                                            } }
+                                        kw = kw + 1;
+                                    }
+                                } }
+                            kh = kh + 1;
+                        }
+                        ci = ci + 1;
+                    }
+                    ow = ow + 1;
+                }
+                oh = oh + 1;
+            }
+            co = co + 1;
+        }
+        n = n + 1;
+    }
+    return 0;
+}
+
+# dx(M,K) = dy(M,N) · W(K,N)^T in linear_bwd's summation shape: four lane sums
+# (lane j takes n ≡ j mod 4, n < N rounded down to 4, in order, as
+# lane = lane + dy·W), combined as (l0 + l1) + (l2 + l3), then the 0..3 tail
+# terms added in order. Bit-identical to linear_bwd where the packed
+# multiply-add rounds twice (x86_64).
+fn ref_linear_dx(W, dy, dx, M, K, N): i64 {
+    var n4 = N - (N % 4);
+    var m = 0;
+    while (m < M) {
+        var k = 0;
+        while (k < K) {
+            var l0 = f64_from(0); var l1 = f64_from(0); var l2 = f64_from(0); var l3 = f64_from(0);
+            var n = 0;
+            while (n < n4) {
+                var d = dy + (m * N + n) * 8; var w = W + (k * N + n) * 8;
+                l0 = f64_add(f64_mul(load64(d), load64(w)), l0);
+                l1 = f64_add(f64_mul(load64(d + 8), load64(w + 8)), l1);
+                l2 = f64_add(f64_mul(load64(d + 16), load64(w + 16)), l2);
+                l3 = f64_add(f64_mul(load64(d + 24), load64(w + 24)), l3);
+                n = n + 4;
+            }
+            var s = f64_add(f64_add(l0, l1), f64_add(l2, l3));
+            while (n < N) {
+                s = f64_add(s, f64_mul(load64(dy + (m * N + n) * 8), load64(W + (k * N + n) * 8)));
+                n = n + 1;
+            }
+            store64(dx + (m * K + k) * 8, s);
+            k = k + 1;
+        }
+        m = m + 1;
+    }
+    return 0;
+}
+
+# Number of elements whose bit patterns differ.
+fn bits_diff(a, b, n): i64 {
+    var d = 0;
+    var i = 0;
+    while (i < n) {
+        if (load64(a + i * 8) != load64(b + i * 8)) { d = d + 1; }
+        i = i + 1;
+    }
+    return d;
+}
+
+# Largest |a - b| / (|a| + |b| + 1e-27) over n elements (0 when bit-identical).
+fn max_relerr(a, b, n): i64 {
+    var mr = f64_from(0);
+    var e9 = f64_div(f64_from(1), f64_from(1000000000));
+    var tiny = f64_mul(f64_mul(e9, e9), e9);
+    var i = 0;
+    while (i < n) {
+        var u = load64(a + i * 8);
+        var v = load64(b + i * 8);
+        if (u != v) {
+            var r = f64_div(f64_abs(f64_sub(u, v)), f64_add(f64_add(f64_abs(u), f64_abs(v)), tiny));
+            if (f64_gt(r, mr) == 1) { mr = r; }
+        }
+        i = i + 1;
+    }
+    return mr;
+}

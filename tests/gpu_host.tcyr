@@ -1,0 +1,96 @@
+# rosnet GPU profile — host-side tests (no device needed).
+#
+# src/gpu.cyr cannot dispatch without an AMD device, but everything it does on
+# the host before a dispatch can run anywhere: the shader-cache bookkeeping, the
+# cache-key field checks, and the SPIR-V builders. These pin the 1.2.2 repairs:
+#   - every builder fits its caller's fn-local `var spv[8192]` (8,192 BYTES) at
+#     the largest parameters that entry point's guards allow — before 1.2.2,
+#     gpu_attn_core had no hd cap and the scores builder wrote 11,172 bytes at
+#     hd = 64, past the end of that stack buffer;
+#   - a full cache answers -1 ("do not compile") instead of 0, so a module that
+#     cannot be cached is never built and leaked;
+#   - _gpu_kfit refuses values that would overflow a key field.
+include "lib/mabda.cyr"
+include "lib/result.cyr"
+include "lib/ganita.cyr"
+include "src/gpu.cyr"
+
+var BUF = 0;
+var BUFSZ = 65536;
+
+fn clr(): i64 {
+    var i = 0;
+    while (i < BUFSZ) { store64(BUF + i, 0); i = i + 8; }
+    return 0;
+}
+
+# Builder output size in bytes must fit spv[8192].
+fn fits(name, nbytes): i64 {
+    assert(nbytes > 0, name);
+    assert(nbytes <= 8192, name);
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    BUF = alloc(BUFSZ);
+    var sc = f64_div(f64_from(1), f64_sqrt(f64_from(32)));
+    var tk = GPU_TK();
+
+    test_group("key fields");
+    assert(_gpu_kfit(0, 14) == 1, "0 fits");
+    assert(_gpu_kfit(16383, 14) == 1, "2^14 - 1 fits 14 bits");
+    assert(_gpu_kfit(16384, 14) == 0, "2^14 does not fit 14 bits");
+    assert(_gpu_kfit(0 - 1, 14) == 0, "negative never fits");
+    assert(_gpu_kfit(1, 1) == 1, "dir 1 fits 1 bit");
+    assert(_gpu_kfit(2, 1) == 0, "dir 2 does not fit 1 bit");
+
+    test_group("shader cache");
+    assert(_GPU_CACHE_CAP() == 1024, "capacity = the 1024 slots the arrays hold");
+    var saved = _gpu_cn;
+    assert(_gpu_cache_get(77) == 0, "miss on a non-full cache = 0 (compile)");
+    _gpu_cache_put(77, 5);
+    assert(_gpu_cache_get(77) == 5, "hit returns the handle");
+    _gpu_cache_put(78, 0 - 1);
+    assert(_gpu_cache_get(78) == (0 - 1), "a cached compile-fail stays -1");
+    var k = _gpu_cn;
+    while (k < _GPU_CACHE_CAP()) { _gpu_cache_put(1000 + k, 9); k = k + 1; }
+    assert(_gpu_cn == _GPU_CACHE_CAP(), "fills to capacity");
+    assert(_gpu_cache_get(77) == 5, "hits still served when full");
+    assert(_gpu_cache_get(424242) == (0 - 1), "miss on a FULL cache = -1 (do not compile)");
+    _gpu_cache_put(424242, 3);
+    assert(_gpu_cn == _GPU_CACHE_CAP(), "put on a full cache stores nothing");
+    _gpu_cn = saved;
+
+    test_group("builders fit spv[8192] at their guard limits");
+    clr(); fits("tile TK=16", _gpu_build_tile(BUF, 768, 768, 0, tk));
+    clr(); fits("tile_t TK=16", _gpu_build_tile_t(BUF, 768, 50257, 0, tk));
+    clr(); fits("tile_dw TK=16", _gpu_build_tile_dw(BUF, 768, 768, 0, tk));
+    clr(); fits("ln mean TK=16", _gpu_build_mean(BUF, 768, 0, tk));
+    clr(); fits("ln var TK=16", _gpu_build_var(BUF, 768, 0, tk));
+    clr(); fits("ln norm", _gpu_build_norm(BUF, 768));
+    clr(); fits("gelu", _gpu_build_gelu(BUF));
+    clr(); fits("gelu_bwd", _gpu_build_gelu_bwd(BUF));
+    clr(); fits("lnbwd_red TK=8", _gpu_build_lnbwd_red(BUF, 768, 0, 64, 8));
+    clr(); fits("lnbwd_param TK=8", _gpu_build_lnbwd_param(BUF, 768, 0, 64, 8));
+    clr(); fits("lnbwd_dx", _gpu_build_lnbwd_dx(BUF, 768, 64));
+    clr(); fits("abwd_dp hd=32", _gpu_build_abwd_dp(BUF, 64, 1024, 32));
+    clr(); fits("abwd_sds", _gpu_build_abwd_sds(BUF, 64, sc));
+    clr(); fits("abwd_dot_t tk=16", _gpu_build_abwd_dot_t(BUF, 64, 0, 16));
+    clr(); fits("abwd_dq_t hd=32 tk=16", _gpu_build_abwd_dq_t(BUF, 64, 1024, 32, 0, 16));
+    clr(); fits("abwd_gather_t hd=32 tk=16", _gpu_build_abwd_gather_t(BUF, 64, 1024, 32, 0, 16));
+    clr(); fits("attn_scores hd=32", _gpu_attn_scores(BUF, 64, 1024, 32, 1024, sc));
+    clr(); fits("attn_rowmax TK", _gpu_attn_rowmax(BUF, 64, 0, _GPU_ATTN_TK()));
+    clr(); fits("attn_expsum TK", _gpu_attn_expsum(BUF, 64, 0, _GPU_ATTN_TK()));
+    clr(); fits("attn_pv hd=32 TK", _gpu_attn_pv(BUF, 64, 1024, 32, 1024, 0, _GPU_ATTN_TK()));
+    clr(); fits("adam", _gpu_adam_k(BUF, 0));
+    clr(); fits("rope", _gpu_build_rope(BUF, 768, 64, 32, 12, 1));
+    # the hazard the hd <= 32 guards exist for: the untiled builders outgrow the buffer
+    clr(); assert(_gpu_attn_scores(BUF, 64, 768, 64, 768, sc) > 8192, "scores at hd=64 would overflow spv[8192]");
+    clr(); assert(_gpu_build_abwd_dp(BUF, 64, 768, 64) > 8192, "abwd_dp at hd=64 would overflow spv[8192]");
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

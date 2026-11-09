@@ -4,6 +4,114 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.2] - 2026-11-09
+
+The P(-1) hardening, optimization and repair sweep, recorded in
+[`docs/audit/2026-11-09-audit.md`](docs/audit/2026-11-09-audit.md). No public
+signature changed, and every CPU result is bit-identical to 1.2.1: a
+15,302-line golden dump of raw f64 bit patterns over every op is byte-identical,
+and so is an 18,167-line dump of every GPU shader builder's output.
+
+### Fixed
+
+- **A stack-buffer overflow in `gpu_attn_core`** (HIGH). It had no head-dim
+  cap, and the scores shader builder unrolls the head dim into a 8,192-byte
+  stack buffer: at hd = 64 (GPT-2's head size) it wrote 11,172 bytes, before
+  mabda's 256-id cap could refuse the shader. hd > 32 now falls back to the
+  CPU, as the backward entry already did.
+- **`gpu_attn_core` could return a wrong result with rc 0.** Its shader-cache
+  key left out the head dim, which the kernels bake in, so two head counts
+  sharing C and T reused each other's kernel. The key now includes it, and both
+  attention entries require `C % nh == 0` — the backward assumed it and,
+  without it, wrote past dK / dV.
+- **A full shader cache leaked a compiled module on every call** and recompiled
+  every time. It stopped at 128 entries though its arrays hold 1024. Capacity
+  is now 1024, and a miss on a full cache falls back to the CPU without
+  compiling.
+- **`t_alloc(0)` exited the process** ("out of memory, requested f64s: 0"). It
+  now returns a valid, distinct pointer — an empty tensor. A negative `n`, or
+  one so large that `8n` wraps (it used to wrap to a small block and the
+  zero-fill ran off the end), exits with "invalid size". Errors now go to
+  stderr.
+- GPU guards checked products, not dims: `gpu_matmul_fwd(M = −1, N = −1, …)`
+  passed. Every entry now checks each dim; `gpu_ln_bwd` also checks M > 0 and
+  that gamma fits its buffer; `gpu_adam_step(NP ≤ 0)` falls back instead of
+  counting a dispatch that never ran.
+- Shader-cache keys could overflow one field into the next for dims ≥ 16,384
+  (degenerate shapes, but silent: a kernel ran for the wrong tile). Every key
+  field is range-checked; out of range falls back to the CPU.
+- **The GPU bundle no longer needs the consumer to define `puts`.** `gpu_probe`
+  called a `puts` that no stdlib module defines; it linked only because attn11
+  defines its own. It now writes the same bytes itself. The GPU sidecar gains
+  `syscalls` and `string`; every consumer already declares both.
+- The attention tile width is a constant, not a mutable global (16 would
+  overflow the build buffer; 0 divides by zero).
+
+### Changed — faster, same bits
+
+Same session, median of three runs ([`docs/benchmarks.md`](docs/benchmarks.md)):
+
+- **`linear_fwd`** 33.4 → 12.4 ms (64×768×768), 9.07 → 4.08 ms (LM-head row):
+  one packed `f64v_axpy` per row step instead of one `f64v_fmadd` per four
+  elements after filling a broadcast buffer.
+- **`linear_bwd`** 70.4 → 43.3 ms: the same for dW.
+- **conv**: `conv2d_fwd` 33.4 → 4.15 ms, `conv2d_bwd` 45.2 → 15.2 ms,
+  `conv1d_fwd` 48.5 → 3.64 ms, `conv1d_bwd` 66.4 → 18.7 ms. The padding window
+  is computed once per output instead of tested per multiply-add, and stride-1
+  convs run along the output row with packed ops.
+- **`t_scale`** 1,707 → 192 ns, **`t_add_into`** 1,729 → 254 ns (n = 768).
+
+Every change keeps each output's sequence of roundings, which
+[ADR 0002](docs/adr/0002-kernel-optimizations-preserve-bits.md) makes the rule
+for optimizations. `t_axpy`, `t_sum` and `linear_bwd`'s dx are unchanged on
+purpose.
+
+### Changed
+
+- **Tests: 23 → 114 assertions.** `tests/reference.cyr` holds the plain-loop
+  forms of the kernels (the 1.2.1 conv loops verbatim); the suite checks every
+  optimized kernel against them, covers the seven public functions that had no
+  test, and `tests/gpu_host.tcyr` checks the GPU profile's host side — cache,
+  key fields, every shader builder fitting its buffer — with no device.
+- **The fuzz harness is real**: seeded property fuzzing, 15,000 random shapes
+  per run with ±0, subnormal, huge and infinite inputs, against the same oracles.
+- **CI**: lint fails on any warning in `src/` and `tests/`; a `vet` step; the
+  drift check regenerates both bundles (a stale GPU bundle used to pass);
+  read-only token by default; actions pinned by commit SHA;
+  `persist-credentials: false`.
+- **Release**: ships the GPU bundle (`rosnet-gpu-<tag>.cyr`); tag filter
+  `X.Y.Z*`; write token only on the publishing job; actions pinned by SHA.
+- `scripts/bench-history.sh` and `bench-history.csv` (before and after rows);
+  benchmarks for every BLAS-1 op and conv1d; `.gitattributes` (`lib/** -text`).
+- **`lib/agnosys.cyr` removed** — a scaffold-era file no cyrius snapshot since
+  6.6.0 ships and nothing used, which `lib sync --full` never prunes. `lib/` is
+  now exactly the 6.7.18 snapshot plus tyche; `cyrius.lock` records 114 files.
+
+### Documentation
+
+- **`docs/benchmarks.md` overstated conv throughput tenfold.** The conv2d shape
+  is 3.61 M multiply-adds, not 36.1 M, so 1.1.0's conv ran at ~0.11 G MAC/s, not
+  ~1.1 (the 1.1.0 entry below and `state.md` repeated it).
+- `docs/api.md`: `linear_fwd` is an AXPY, not a tree-reduced dot;
+  `gpu_matmul_fwd` and `gpu_ln_fwd` are bit-exact (gated on `g_gpu`), not
+  tolerance-class; a GPU fallback may leave outputs partially written (the
+  accumulated ones are written only after the last fallback point); new
+  *Numerical reproducibility* section — x86_64 vs aarch64, where cyrius fuses
+  the packed multiply-add.
+- `SECURITY.md` described 0.2.0 and an unaudited library; rewritten for 1.x.
+- `CLAUDE.md`: `var g[N]` at module scope is N i64 slots, not N bytes.
+- ADR 0002; every public function documented (`cyrius doc --check` clean).
+
+### Note — GPU consumers need cyrius ≥ 6.6.19
+
+True since 1.1.3, found now. Newer distlib writes an `include "lib/mabda.cyr"`
+prelude into the GPU bundle, which 6.6.2 – 6.6.18 cannot compile ("unexpected
+enum" at 6.6.2, an undefined `MAP_SHARED` at 6.6.10 – 6.6.18). 6.6.19 and later
+compile it with identical shader output. The CPU bundle is unaffected: the 1.2.2
+CPU bundle compiles under 6.6.2 and gives the golden dump bit for bit. attn11
+pins 6.6.2 and rosnet 1.1.2, so it must move to 6.6.19+ when it takes a GPU
+bundle from 1.1.3 or later.
+
 ## [1.2.1] - 2026-11-09
 
 A toolchain and dependency realign. No source change.

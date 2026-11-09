@@ -96,7 +96,8 @@ jobs:
         # bookkeeping, key fields, and every SPIR-V builder fitting its buffer —
         # which needs no device. cyrius 6.7.6 deprecated the plural
         # `cyrius tests` (it warns) and 6.7.12 removes it. tests/gpu_device.tcyr runs the
-        # GPU ops on a real device and SKIPS (exit 0) on a runner without one.
+        # GPU ops on a real device; on a runner without one it checks the no-device
+        # fallback contract instead (a file that calls assert_summary() must assert).
         run: cyrius test tests
 
       - name: Tests + fuzz on aarch64 (qemu-user)

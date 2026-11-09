@@ -52,8 +52,12 @@ dump).
   cache cap, and every multi-stage entry's outputs staying untouched when its
   last stage falls back. To force that, the test marks the last stage's kernel
   as a known compile failure, and checks that the earlier stages ran. Without a
-  device the file prints SKIP and exits 0 (checked with `/dev/dri` hidden). It
-  catches 1.2.1's attention code and a moved-back `dx` readback.
+  device (a CI runner) it checks the no-device contract instead, 7 assertions:
+  `gpu_probe` reports no device, the unavailable state sticks, and the entries
+  fall back with their outputs untouched. (`cyrius test` fails a file that calls
+  `assert_summary()` but reports no assertions, so a bare skip is not an
+  option; checked through the runner with `/dev/dri` hidden.) It catches
+  1.2.1's attention code and a moved-back `dx` readback.
 - `tests/gpu_host.tcyr` 60 → 71 assertions: transient module lifetime, and the
   sticky dispatch failure.
 - **An aarch64 CI leg** under qemu-user, same shape as tyche's. It runs the CPU

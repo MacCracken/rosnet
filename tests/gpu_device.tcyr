@@ -1,4 +1,5 @@
-# rosnet GPU profile — device tests (need a native AMD f64 GPU; SKIP cleanly without one).
+# rosnet GPU profile — device tests. With a native AMD f64 GPU they run the ops on it;
+# without one (a CI runner) they check the no-device fallback contract instead.
 #
 # tests/gpu_host.tcyr covers what runs on the host; this file runs the ops on the
 # device and checks what only a device run can show:
@@ -168,8 +169,23 @@ fn attn_case(name, T, C, nh, must_run): i64 {
 fn main() {
     alloc_init();
     if (_gpu_init() == 0) {
-        println("gpu_device: SKIP (no native AMD f64 GPU; tests/gpu_host.tcyr covers the host side)");
-        return 0;
+        # No device (a CI runner). Check the no-device contract instead: every entry
+        # falls back and touches nothing. (`cyrius test` also requires at least one
+        # assertion from a file that calls assert_summary(): a bare exit 0 fails.)
+        println("gpu_device: no native AMD f64 GPU — checking the no-device fallback only");
+        test_group("no device: every entry falls back, touching nothing");
+        assert(gpu_probe() == 1, "gpu_probe reports no device");
+        assert(_gpu_init() == 0, "the unavailable state is sticky (no re-probe)");
+        var nx = t_alloc(4 * 16); var nW = t_alloc(16 * 4); var ny = t_alloc(4 * 4);
+        sentinel(ny, 4 * 4);
+        assert(gpu_matmul_fwd(nx, nW, 0, ny, 4, 16, 4) != 0, "gpu_matmul_fwd falls back");
+        assert(untouched(ny, 4 * 4) == 1, "... y untouched");
+        var nq = t_alloc(16 * 32); var np = t_alloc(8 * 16 * 16); var nc = t_alloc(16 * 32);
+        sentinel(nc, 16 * 32);
+        assert(gpu_attn_core(nq, nq, nq, np, nc, 16, 32, 8, 8) != 0, "gpu_attn_core falls back");
+        assert(untouched(nc, 16 * 32) == 1, "... concat untouched");
+        assert((gpu_mm_count() + gpu_attn_count()) == 0, "nothing counted as dispatched");
+        return assert_summary();
     }
 
     test_group("matmul on the device");

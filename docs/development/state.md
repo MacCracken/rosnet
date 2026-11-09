@@ -97,7 +97,8 @@ its consumer beyond mabda.
   capacity / full-cache behaviour, key fields, every SPIR-V builder within
   `spv[8192]` at its guard limits, transient lifetime, sticky dispatch.
   **71/71** (x86_64 and aarch64).
-- `tests/gpu_device.tcyr` — the GPU ops on a real device (SKIP without one):
+- `tests/gpu_device.tcyr` — the GPU ops on a real device (without one, e.g. on
+  CI, 7 assertions of the no-device fallback contract instead):
   bit-exact matmul, the attention cache-key pair, untouched outputs on a
   late-stage fallback, the soft cache cap. **39/39** on a Radeon Vega (GFX9).
 - `tests/rosnet.fcyr` — seeded property fuzzer: 15,000 random shapes per run

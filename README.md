@@ -85,7 +85,7 @@ Then `cyrius deps` and `include "lib/rosnet.cyr"`.
 ```sh
 cyrius deps                                # resolve tyche + stdlib
 cyrius build src/main.cyr build/rosnet     # compile the smoke demo
-cyrius tests                               # grad-checks + BLAS-1 (tests/*.tcyr)
+cyrius test tests                          # grad-checks + BLAS-1 (tests/*.tcyr)
 cyrius distlib                             # regenerate dist/rosnet.cyr
 ```
 

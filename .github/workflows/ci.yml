@@ -72,12 +72,12 @@ jobs:
         run: ./build/rosnet
 
       - name: Tests
-        # Plural `cyrius tests` recursively runs tests/*.tcyr — rosnet's
+        # `cyrius test tests` recursively runs tests/*.tcyr — rosnet's
         # correctness gate (tests/rosnet.tcyr): exact BLAS-1 ops + CENTRAL
         # finite-difference grad-checks of linear_bwd (dx/dW/db < 1e-5),
-        # ported from attn11. `cyrius test <file>` runs a single program and
-        # would NOT reach the suite.
-        run: cyrius tests
+        # ported from attn11. cyrius 6.7.6 deprecated the plural `cyrius tests`
+        # (it warns) and 6.7.12 removes it.
+        run: cyrius test tests
 
       - name: Benchmarks
         run: CYRIUS_DCE=1 cyrius bench tests/rosnet.bcyr

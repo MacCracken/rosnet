@@ -4,6 +4,53 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-11-09
+
+Moves rosnet onto the cyrius 6.7 series. No library or API change.
+
+### Changed
+
+- **Toolchain `6.6.20` → `6.7.9`** (through 6.7.0–6.7.8). `src/` is unchanged,
+  and so is every value rosnet computes. A dump of 7,462 raw f64 bit
+  patterns is byte-identical between 1.1.3 @ 6.6.20 and 1.2.0 @ 6.7.9. It runs
+  every CPU op at a fixed seed: BLAS-1 at length 37 (not a SIMD multiple);
+  `linear_fwd` / `linear_bwd` at four shapes up to 16×96×33; `conv2d_fwd` /
+  `conv2d_bwd` at three, strided, padded and non-square; and `conv1d_fwd` /
+  `conv1d_bwd` at two. **23 assertions** pass, the fuzz harness passes, and fmt
+  and lint are clean. Benchmarks did not slow down: on the same host, medians
+  of three interleaved runs per toolchain are 0–5% faster at 6.7.9, inside the
+  3–4% spread between runs of one toolchain. The smoke binary stays at
+  175,248 B.
+
+  Upstream changes checked against rosnet's source (`src/`, `tests/`):
+  - **6.7.0–6.7.8** reserve `trait`, `const`, `true`, `false`, `do` and `dyn`,
+    and **6.7.3** makes `!` a real operator. Before that a lone `!x` compiled as
+    `x`. rosnet uses none of them outside comments and strings.
+  - **6.7.9** makes unary `-` and `~` on a constant bind tighter, and
+    **6.7.8–6.7.9** change how typed `*T` pointers step and dereference.
+    rosnet has no unary `-` or `~` on a name, and no typed pointers: its
+    tensors are untyped addresses read with `load64` / `store64`.
+  - **6.7.6** rounds every write into an `f32`. rosnet has no `f32`.
+  - **6.7.6** turns mabda's `F64_*` colour values into `const`s. The GELU
+    constant in `src/gpu.cyr` reads `F64_PI`, which comes from `math.cyr` and
+    was already initialised to π.
+- **Tests run as `cyrius test tests`.** cyrius 6.7.6 deprecated `cyrius tests`,
+  which now warns, and 6.7.12 removes it. CI's Tests step and the README now use
+  `cyrius test tests`: same suite, same result. Bare `cyrius test`, which
+  CLAUDE.md, `CONTRIBUTING.md` and the getting-started guide use, still runs it.
+- **`[deps.tyche]` `1.1.1` → `1.2.0`**, the tyche release built against 6.7.9.
+  tyche's source and stream did not change.
+- **Vendored `lib/` re-synced** (`cyrius lib sync --full`). It byte-matches the
+  6.7.9 snapshot: the same 113 files as 6.6.20, 67 of them with new content.
+  Nothing was added or removed.
+- **`cyrius.lock` regenerated from scratch**, as in 1.1.3: `cyrius deps` added
+  the tyche 1.2.0 line (`2c393fe`) but kept the 1.1.1 line. The same 115 file
+  hashes, trailer `cyrius 6.7.9`. `cyrius deps --verify` and 6.7.6's
+  `cyrius deps --locked` are both clean.
+- `dist/rosnet.cyr` and `dist/rosnet-gpu.cyr` change only in their version
+  line, and both sidecars are unchanged. The GPU bundle still relies on the
+  consumer's `puts` (see 1.1.3).
+
 ## [1.1.3] - 2026-11-09
 
 A toolchain and dependency realign. No source change.

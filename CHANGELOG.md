@@ -4,6 +4,60 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-11-09
+
+A toolchain and dependency realign. No source change.
+
+### Changed
+
+- **Toolchain `6.6.2` → `6.6.20`** (through 6.6.3–6.6.19). **23 assertions**
+  pass unchanged. fmt and lint are clean, and the smoke binary runs. The smoke
+  binary grows from 109,856 to 175,248 B, all of it stdlib code that DCE would
+  drop. Benchmarks did not move: two interleaved runs per toolchain on the same
+  host put all six ops within the run-to-run spread of ±5%.
+- **`[deps.tyche]` `1.0.1` → `1.1.1`**, the tyche release built against 6.6.20.
+  tyche's frozen 1.x surface is unchanged. Its 1.1.0 changed `rng_normal` to use
+  a portable logarithm, which moves 0.011% of x86_64 draws by 1–3 ulp and gives
+  aarch64 the same stream as x86_64. `t_randn` inherits that. The suite uses
+  `t_randn` only to fill grad-check inputs, never compares drawn values, and
+  passes unchanged.
+- **Vendored `lib/` re-synced** (`cyrius lib sync --full`). It byte-matches the
+  6.6.20 snapshot, 113 files. Five are new: `alloc_cx`, `boxed`, `hashseed`,
+  `poison` and `tls_hostid`. This clears the warning that `./lib/` shadowed 12
+  pinned bundled libs, which 1.1.2 carried because it bumped the pin without a
+  full re-sync.
+- **`cyrius.lock` regenerated from scratch.** `cyrius deps` added the tyche
+  1.1.1 line (`68bb5db`) but kept the 1.0.1 line (`73197d4`) above it.
+  Regenerating leaves one tyche line, with the same 115 file hashes. The 6.6.20
+  format also records the toolchain (`cyrius 6.6.20`). `cyrius deps --verify`
+  is clean.
+- **The sidecars list only what the bundles need.** From 6.6.18,
+  `cyrius distlib` writes only the stdlib leaves a bundle provably needs
+  (compile-verified) and also emits them as `include` lines at the top of the
+  bundle.
+  - `dist/rosnet.deps`: 10 → 4 leaves (`alloc`, `string`, `fmt`, `syscalls`).
+  - `dist/rosnet-gpu.deps`: 14 → 4 leaves (`mabda`, `math`, `result`, `ganita`).
+
+  **Consumers:** a build that used `io`, `vec`, `str`, `assert`, `bench` or
+  `math` only because rosnet's sidecar brought it in must now declare that leaf
+  in its own `[deps] stdlib`. cyrius 6.6.18 and later name the leaf to add when
+  such a build fails. All six consumers already declare all ten leaves (checked
+  in their manifests on 2026-11-09), so none is affected.
+- **`cyrius distlib gpu` now succeeds.** The 1.1.2 note below said it errored
+  on mabda and math enum constants the bundle leaves undefined. The gpu sidecar
+  now pulls in `mabda`, `math` and `ganita`, so those constants resolve.
+  `cyrius distlib --all --check` passes for both bundles.
+
+### Note — the GPU bundle relies on the consumer's `puts`
+
+6.6.20's compile-verify reports one name the GPU bundle uses that no stdlib
+leaf defines: `puts`, which `gpu_probe` calls four times. No cyrius release
+from 6.6.0 on defines it. attn11, the GPU consumer, defines its own (`fn puts`
+in its `src/tensor.cyr`), so nothing broke. This was already true at 1.1.2,
+whose toolchain did not check undefined functions, so this release changes
+nothing for consumers. A GPU consumer that does not define `puts` cannot link
+`gpu_probe`. It is not fixed here, because this release changes no source.
+
 ## [1.1.2] - 2026-09-11
 
 ### Fixed — the GPU bundle shipped a retired accessor

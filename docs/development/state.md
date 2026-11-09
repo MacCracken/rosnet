@@ -5,6 +5,12 @@
 
 ## Version
 
+**1.4.1 — 2026-11-09 (AVX2 for the packed kernels).** `linear_fwd`, linear_bwd's
+dW, `t_scale` and `t_add_into` run 4 lanes wide on an AVX2 CPU (`vmulpd` +
+`vaddpd`, the same bits; aarch64 unchanged). A mixed training step is 3.1%
+faster on a Ryzen 7 5800H. The `simd` leaf joins the CPU sidecar (the bundle
+includes it; it compiles under consumers' cyrius 6.6.2). No API change.
+
 **1.4.0 — 2026-11-09 (GPU attention at real head sizes).** The forward scores
 and backward dp kernels run in hd tiles of 8, so attention runs on the device at
 any hd below 128 — GPT-2's 64 included (1.3.0 fell back above 11 / 17). Same
@@ -85,9 +91,9 @@ the CPU oracle in attn11's 12-test GPU suite. **0.1.1** — scaffolded
   `_gpu_dispatch` (sticky on failure); outputs read back after the last dispatch.
 - `src/main.cyr` — smoke demo (`main()` + `SYS_EXIT`; excluded from the bundle).
 
-CPU `[lib]` bundle → `dist/rosnet.cyr` (640 lines, v1.4.0; sidecar
-`dist/rosnet.deps` = syscalls, string, fmt, alloc); GPU profile →
-`dist/rosnet-gpu.cyr` (2551 lines, v1.4.0; sidecar = mabda, math, result,
+CPU `[lib]` bundle → `dist/rosnet.cyr` (726 lines, v1.4.1; sidecar
+`dist/rosnet.deps` = syscalls, string, fmt, alloc, simd); GPU profile →
+`dist/rosnet-gpu.cyr` (2551 lines, v1.4.1; sidecar = mabda, math, result,
 ganita, syscalls, string). Regenerate with `cyrius distlib --all`; verify with
 `cyrius distlib --all --check`. Since 1.2.2 the GPU bundle needs no symbol from
 its consumer beyond mabda.
@@ -97,8 +103,10 @@ its consumer beyond mabda.
 - `tests/rosnet.tcyr` — CPU suite: exact BLAS-1 checks, central
   finite-difference grad-checks of `linear_bwd` / `conv2d_bwd`, conv
   known-answer, conv1d parity (fwd + bwd), storage, and every optimized kernel
-  against the plain-loop oracles in `tests/reference.cyr`. **54/54** on x86_64,
-  **60/60** on aarch64 (qemu; the linear cases take the tolerance branch).
+  against the plain-loop oracles in `tests/reference.cyr`, on both the AVX2 and
+  the SSE2 path (`_rosnet_force_sse2`, test-only), plus the two paths compared
+  bit for bit. **70/70** on x86_64, **79/79** on aarch64 (qemu; the linear cases
+  take the tolerance branch).
 - `tests/gpu_host.tcyr` — the GPU profile's host side, no device: cache
   capacity / full-cache behaviour, key fields, every SPIR-V builder within
   `spv[8192]` at its guard limits (the tiled attention builders at hd 127),
@@ -118,7 +126,7 @@ its consumer beyond mabda.
 
 Direct (declared in `cyrius.cyml`):
 
-- stdlib — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math
+- stdlib — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math, simd (the AVX2 probe, 1.4.1)
 - **tyche** (`1.2.2`, commit `cdb74e2`; the latest release, built against
   cyrius 6.7.18) — deterministic statistical PRNG; supplies
   `rng_seed`/`rng_normal` for `t_randn`. The only non-stdlib dep; pure
@@ -133,9 +141,7 @@ Direct (declared in `cyrius.cyml`):
 
 ## Next
 
-**1.4.1** — the AVX2 path for `linear_fwd` / dW, decided and scheduled
-(bit-identical, ~9.5% faster; the `simd` leaf joins the CPU sidecar; tests cover
-both the AVX2 and the SSE2 path). Then demand-gated 1.x minors
+Nothing is scheduled past 1.4.1. Next come the demand-gated 1.x minors
 (wideners, quantized dtypes, numerical releases, strided conv via a different
 layout) and a 2.0.0 backlog nothing yet forces. Carried over to attn11: cyrius
 ≥ 6.6.19, and two `expect_fb` lines → `run_shape` for rosnet ≥ 1.4.0. See

@@ -72,6 +72,17 @@ fn t_copy(dst, src, n): i64 {
 }
 
 # ---- BLAS-1 (vector) ops ---------------------------------------------------
+# Test-only switch: 1 forces the SSE2 paths even on an AVX2 CPU, so CI's AVX2
+# runners still check them (tests/rosnet.tcyr, tests/rosnet.fcyr). Not API.
+var _rosnet_force_sse2 = 0;
+
+# 1 when the 4-lane AVX2 kernels may run: the CPU has AVX2 (cached CPUID probe;
+# always 0 on aarch64, where the probe compiles out) and no test forced SSE2.
+fn _rosnet_avx2(): i64 {
+    if (_rosnet_force_sse2 == 1) { return 0; }
+    return simd_has_avx2();
+}
+
 # dst[i] += a * src[i]   (a is an f64 bit pattern)
 fn t_axpy(dst, src, a, n): i64 {
     var i = 0;
@@ -84,14 +95,20 @@ fn t_axpy(dst, src, a, n): i64 {
 }
 
 # dst[i] += src[i]
-# Packed over the even prefix: f64v_add is one addpd / fadd per element on every
-# target (a single rounding, as f64_add), so the result is bit-identical to the
-# scalar loop wherever the split falls. The f64v builtins have no scalar tail —
-# they write whole 2-lane pairs — so the count passed is even and the odd last
-# element is added alone.
+# Packed over a prefix: f64v_add is one addpd / fadd per element on every target
+# and f64v256_add one vaddpd (a single rounding, as f64_add), so the result is
+# bit-identical to the scalar loop wherever the split falls. The f64v builtins
+# have no scalar tail — they write whole lane groups — so the count passed is a
+# multiple of the lanes (2, or 4 on the AVX2 path, 1.4.1: ~1.6× at n = 768) and
+# the rest is added alone.
 fn t_add_into(dst, src, n): i64 {
     var n2 = n - (n % 2);
-    f64v_add(dst, dst, src, n2);
+    if (_rosnet_avx2() == 1) {
+        n2 = n - (n % 4);
+        f64v256_add(dst, dst, src, n2);
+    } else {
+        f64v_add(dst, dst, src, n2);
+    }
     var i = n2;
     while (i < n) {
         store64(dst + i * 8, f64_add(load64(dst + i * 8), load64(src + i * 8)));
@@ -101,11 +118,17 @@ fn t_add_into(dst, src, n): i64 {
 }
 
 # dst[i] *= s
-# Packed over the even prefix like t_add_into: f64v_scale is one mulpd / fmul
-# per element on every target, so the result is bit-identical to f64_mul.
+# Packed over a prefix like t_add_into: f64v_scale is one mulpd / fmul per
+# element on every target and f64v256_scale one vmulpd, so the result is
+# bit-identical to f64_mul (AVX2 path 1.4.1: ~1.7× at n = 768).
 fn t_scale(dst, n, s): i64 {
     var n2 = n - (n % 2);
-    f64v_scale(dst, dst, s, n2);
+    if (_rosnet_avx2() == 1) {
+        n2 = n - (n % 4);
+        f64v256_scale(dst, dst, s, n2);
+    } else {
+        f64v_scale(dst, dst, s, n2);
+    }
     var i = n2;
     while (i < n) {
         store64(dst + i * 8, f64_mul(load64(dst + i * 8), s));

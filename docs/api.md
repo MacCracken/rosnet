@@ -58,8 +58,9 @@ audited rationale.)
 
 Every op's summation order is fixed and documented above, so results are
 deterministic run to run. Across targets: on **x86_64** the packed bodies round
-exactly like the scalar code (`mulpd` then `addpd`), so the vectorized kernels
-equal the plain loops bit for bit. On **aarch64** cyrius lowers the packed
+exactly like the scalar code (`mulpd` then `addpd`, or `vmulpd` then `vaddpd`
+on the AVX2 path, chosen at run time since 1.4.1 — the same bits), so the
+vectorized kernels equal the plain loops bit for bit on any x86_64 CPU. On **aarch64** cyrius lowers the packed
 multiply-add (`linear_fwd`, `linear_bwd`'s dx / dW) to a fused `FMLA`, one
 rounding, so those differ from x86_64 in the last bits. `t_scale`,
 `t_add_into`, the conv ops and every scalar op round identically on both. A NaN

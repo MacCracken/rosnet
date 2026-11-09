@@ -85,6 +85,7 @@ fn fz_conv(round): i64 {
 }
 
 fn fz_blas1(round): i64 {
+    _rosnet_force_sse2 = round % 2;       # alternate the AVX2 and SSE2 paths (1.4.1)
     var n = rnd_below(66);
     var a = rnd_fill(n); var b = rnd_fill(n); var s = rnd_val();
     var ra = t_alloc(n); t_copy(ra, a, n);
@@ -102,6 +103,7 @@ fn fz_blas1(round): i64 {
     i = 0;
     while (i < z) { if (load64(p + i * 8) != 0) { nz = nz + 1; } i = i + 1; }
     fz_check((p != 0) & (nz == 0), round, "t_alloc not a zeroed block");
+    _rosnet_force_sse2 = 0;
     return 0;
 }
 
@@ -113,7 +115,9 @@ fn rnd_fill_normal(n): i64 {
 }
 
 fn fz_linear(round): i64 {
+    _rosnet_force_sse2 = round % 2;       # alternate the AVX2 and SSE2 paths (1.4.1)
     var M = 1 + rnd_below(5); var K = rnd_below(12); var N = 1 + rnd_below(14);
+    if (rnd_below(6) == 0) { N = 120 + rnd_below(200); }   # rows past one 128-lane chunk
     var x = rnd_fill_normal(M * K); var W = rnd_fill_normal(K * N); var dy = rnd_fill_normal(M * N);
     var b = 0; var db = 0; var rdb = 0;
     if (rnd_below(3) != 0) { b = rnd_fill_normal(N); db = t_alloc(N); rdb = t_alloc(N); }
@@ -136,6 +140,7 @@ fn fz_linear(round): i64 {
         fz_check(f64_gt(max_relerr(dW, rdW, K * N), tol) == 0, round, "linear_bwd dW vs oracle");
     }
     if (db != 0) { fz_check(bits_diff(db, rdb, N) == 0, round, "linear_bwd db != oracle"); }
+    _rosnet_force_sse2 = 0;
     return 0;
 }
 

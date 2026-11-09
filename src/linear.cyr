@@ -19,7 +19,8 @@
 # contiguous output dim N (W is row-major (K,N), so W[k, n..] is contiguous).
 # Loop order is (m, k, n): y[m,:] is initialised to the bias then accumulated
 # as y[m, 0..n4) += x[m,k] * W[k, 0..n4) by ONE f64v_axpy per (m, k) — the
-# packed y += alpha*x builtin with a scalar alpha, so no broadcast buffer.
+# packed y += alpha*x builtin with a scalar alpha (the AVX2 path below builds a
+# 128-lane broadcast instead, since there is no 256-bit axpy).
 # The per-element += sequence over k is the scalar one, so on x86_64 the result
 # is BIT-IDENTICAL to scalar f64_mul+f64_add (f64v_axpy lowers to mulpd+addpd:
 # two roundings). On aarch64 every packed multiply-add (f64v_axpy, f64v_fmadd)
@@ -28,8 +29,38 @@
 # n4 = N rounded down to a multiple of 4 (the 1.2.1 split, kept so every element
 # takes the same path as before); the f64v builtins have no scalar tail and
 # write whole 2-lane pairs, so the count passed must stay even.
+# 1.4.1: on an AVX2 CPU the AXPY runs 4 lanes wide (see _ln_ones_init) — same bits.
+
+# Ones for the AVX2 broadcast (module scope: 128 slots = 1 KB), filled on first use.
+var _ln_ones[128];
+var _ln_ones_ready = 0;
+# (_rosnet_force_sse2, the test-only switch to the SSE2 path, is in tensor.cyr.)
+
+# The AVX2 row step (1.4.1), written out in linear_fwd and in _ln_bwd_dW:
+# y[0..n4) += a·w[0..n4) as a 128-lane broadcast of a, made by one f64v256_scale
+# of the ones row (a·1 = a exactly), then one f64v256_fmadd per 128-lane chunk,
+# y = a·w + y. That lowers to vmulpd then vaddpd — two roundings, not a fused op —
+# so it is bit-identical to f64v_axpy's mulpd + addpd. (As everywhere, a NaN made
+# from two NaN operands may carry the other operand's payload.) The path is chosen
+# once per call; without AVX2, and always on aarch64 (simd_has_avx2() is 0 there),
+# it is f64v_axpy. The f64v256 builtins write whole 4-lane groups, which n4 is.
+fn _ln_ones_init(): i64 {
+    if (_ln_ones_ready == 0) {
+        var q = 0;
+        while (q < 128) { store64(&_ln_ones + q * 8, f64_from(1)); q = q + 1; }
+        _ln_ones_ready = 1;
+    }
+    return 0;
+}
+
+# y(M,N) = x(M,K) @ W(K,N) [+ b(N)] — see the SIMD note at the top of this section.
 fn linear_fwd(x, W, b, y, M, K, N): i64 {
     var n4 = N - (N % 4);           # vector body; scalar tail for 0..3
+    var avx = _rosnet_avx2();
+    var bc[1024];                   # AVX2 broadcast: 128 f64 (bytes, fn-local)
+    var bl = n4;
+    if (bl > 128) { bl = 128; }
+    if (avx == 1) { _ln_ones_init(); }
     var m = 0;
     while (m < M) {
         var yrow = y + m * N * 8;
@@ -44,7 +75,18 @@ fn linear_fwd(x, W, b, y, M, K, N): i64 {
         while (k < K) {
             var xmk = load64(xrow + k * 8);
             var Wrow = W + k * N * 8;
-            f64v_axpy(yrow, Wrow, xmk, n4);
+            if (avx == 1) {
+                f64v256_scale(&bc, &_ln_ones, xmk, bl);
+                var c0 = 0;
+                while (c0 < n4) {
+                    var cn = n4 - c0;
+                    if (cn > 128) { cn = 128; }
+                    f64v256_fmadd(yrow + c0 * 8, &bc, Wrow + c0 * 8, yrow + c0 * 8, cn);
+                    c0 = c0 + cn;
+                }
+            } else {
+                f64v_axpy(yrow, Wrow, xmk, n4);
+            }
             n = n4;
             while (n < N) {
                 store64(yrow + n * 8, f64_add(load64(yrow + n * 8),
@@ -54,6 +96,46 @@ fn linear_fwd(x, W, b, y, M, K, N): i64 {
             k = k + 1;
         }
         m = m + 1;
+    }
+    return 0;
+}
+
+# linear_bwd's dW pass: dW[k,n] += Σ_m x[m,k]·dy[m,n], the linear_fwd row step per (k, m).
+# Its own function so its locals do not crowd the dx loop's registers (1.4.1).
+fn _ln_bwd_dW(x, dy, dW, M, K, N, n4): i64 {
+    var avx = _rosnet_avx2();
+    var bc[1024];                   # AVX2 broadcast: 128 f64 (bytes, fn-local)
+    var bl = n4;
+    if (bl > 128) { bl = 128; }
+    if (avx == 1) { _ln_ones_init(); }
+    var kk = 0;
+    while (kk < K) {
+        var dWrow = dW + kk * N * 8;
+        var mm = 0;
+        while (mm < M) {
+            var xmk = load64(x + (mm * K + kk) * 8);
+            var dyrow = dy + mm * N * 8;
+            if (avx == 1) {
+                f64v256_scale(&bc, &_ln_ones, xmk, bl);
+                var c0 = 0;
+                while (c0 < n4) {
+                    var cn = n4 - c0;
+                    if (cn > 128) { cn = 128; }
+                    f64v256_fmadd(dWrow + c0 * 8, &bc, dyrow + c0 * 8, dWrow + c0 * 8, cn);
+                    c0 = c0 + cn;
+                }
+            } else {
+                f64v_axpy(dWrow, dyrow, xmk, n4);
+            }
+            var n = n4;
+            while (n < N) {
+                store64(dWrow + n * 8, f64_add(load64(dWrow + n * 8),
+                    f64_mul(xmk, load64(dyrow + n * 8))));
+                n = n + 1;
+            }
+            mm = mm + 1;
+        }
+        kk = kk + 1;
     }
     return 0;
 }
@@ -96,25 +178,7 @@ fn linear_bwd(x, W, dy, dx, dW, db, M, K, N): i64 {
         }
         m = m + 1;
     }
-    # dW[k,n] += sum_m x[m,k] * dy[m,n] — the same one-call axpy as linear_fwd
-    var kk = 0;
-    while (kk < K) {
-        var dWrow = dW + kk * N * 8;
-        var mm = 0;
-        while (mm < M) {
-            var xmk = load64(x + (mm * K + kk) * 8);
-            var dyrow = dy + mm * N * 8;
-            f64v_axpy(dWrow, dyrow, xmk, n4);
-            var n = n4;
-            while (n < N) {
-                store64(dWrow + n * 8, f64_add(load64(dWrow + n * 8),
-                    f64_mul(xmk, load64(dyrow + n * 8))));
-                n = n + 1;
-            }
-            mm = mm + 1;
-        }
-        kk = kk + 1;
-    }
+    _ln_bwd_dW(x, dy, dW, M, K, N, n4);
     if (db != 0) {
         var nb = 0;
         while (nb < N) {

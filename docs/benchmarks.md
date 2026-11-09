@@ -110,8 +110,14 @@ table above, not across captures.
   convs run the hoisted scalar loops, about a quarter of the stride-1 row
   kernel's rate. A gather-based row kernel was measured and not adopted (~10%
   faster at stride 2, ~7% slower at stride 3); see the roadmap.
-- **AVX2** was measured for `linear_fwd` (a 128-lane broadcast plus one
-  `f64v256_fmadd` per chunk — `vmulpd` + `vaddpd`, so the same bits): ~9.5%
-  faster at 64×768×768 (11.0 vs 12.1 ms, interleaved, same session). Scheduled
-  for 1.4.1 (it adds the `simd` stdlib leaf to the CPU sidecar); see the
-  roadmap.
+- **1.4.1 adds AVX2** to `linear_fwd`, linear_bwd's dW, `t_scale` and
+  `t_add_into` (same bits: `vmulpd` / `vaddpd` round as `mulpd` / `addpd`).
+  Measured in alternating processes, median of 5: `linear_fwd` 64×768×768
+  12.27 → 11.40 ms, `linear_bwd` 43.36 → 41.94 ms, `t_scale` 205 → 123 ns,
+  `t_add_into` 249 → 158 ns, and the new **training-step** row (linear fwd +
+  bwd, conv fwd + bwd, SGD update) 74.76 → 72.44 ms (−3.1%).
+- **Read per-op rows with care on this CPU.** 256-bit work lowers a
+  power-limited laptop CPU's clock for whatever runs next: in the full harness,
+  `conv2d_fwd`, which runs right after the AVX2 rows, reads ~20% slower in 1.4.1
+  with unchanged code, against 3% run alone. The training-step row measures a
+  real mix and is the one to trust for "did this make a workload faster".

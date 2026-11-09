@@ -221,6 +221,41 @@ fn bench_conv1d(): i64 {
     return 0;
 }
 
+# A mixed "training step": every hot op once per step, timed end to end. Per-op
+# rows can mislead on a power-limited CPU — 256-bit AVX2 work lowers the clock for
+# whatever runs next — so this row is the one that says whether a change made a
+# real workload faster (1.4.1).
+fn bench_step(): i64 {
+    var M = 64; var K = 768; var N = 768;
+    var x = t_alloc(M * K); var W = t_alloc(K * N); var b = t_alloc(N); var y = t_alloc(M * N);
+    var dy = t_alloc(M * N); var dx = t_alloc(M * K); var dW = t_alloc(K * N); var db = t_alloc(N);
+    t_fill(x, M * K, f64_div(ff(1), ff(7))); t_fill(W, K * N, f64_div(ff(1), ff(11)));
+    t_fill(dy, M * N, f64_div(ff(1), ff(5)));
+    var cN = 8; var Ci = 8; var H = 28; var Wd = 28; var Co = 8; var KK = 3;
+    var cx = t_alloc(cN * Ci * H * Wd); var cw = t_alloc(Co * Ci * KK * KK); var cb = t_alloc(Co);
+    var cy = t_alloc(cN * Co * H * Wd); var cdx = t_alloc(cN * Ci * H * Wd);
+    var cdw = t_alloc(Co * Ci * KK * KK); var cdb = t_alloc(Co);
+    t_fill(cx, cN * Ci * H * Wd, f64_div(ff(1), ff(7))); t_fill(cw, Co * Ci * KK * KK, f64_div(ff(1), ff(11)));
+    var lr = f64_div(ff(1), ff(1000));
+    var bh = bench_new("training step (linear fwd+bwd, conv fwd+bwd, SGD update)");
+    bench_batch_start(bh);
+    var s = 0;
+    while (s < 8) {
+        linear_fwd(x, W, b, y, M, K, N);
+        t_zero(dW, K * N); t_zero(db, N);
+        linear_bwd(x, W, dy, dx, dW, db, M, K, N);
+        conv2d_fwd(cx, cw, cb, cy, cN, Ci, H, Wd, Co, KK, KK, 1, 1, 1, 1);
+        t_zero(cdw, Co * Ci * KK * KK); t_zero(cdb, Co);
+        conv2d_bwd(cx, cw, cy, cdx, cdw, cdb, cN, Ci, H, Wd, Co, KK, KK, 1, 1, 1, 1);
+        t_scale(dW, K * N, lr);
+        t_add_into(W, dW, K * N);
+        s = s + 1;
+    }
+    bench_batch_stop(bh, 8);
+    bench_report(bh);
+    return 0;
+}
+
 fn main(): i64 {
     alloc_init();
     bench_axpy_768();
@@ -230,6 +265,7 @@ fn main(): i64 {
     bench_linear_bwd_proj();
     bench_conv2d();
     bench_conv1d();
+    bench_step();
     return 0;
 }
 

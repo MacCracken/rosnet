@@ -244,6 +244,21 @@ fn main() {
     linear_ref_case("4x0x5 (K = 0: y = b)", 4, 0, 5, 1);
     linear_ref_case("3x4x6 no bias", 3, 4, 6, 0);
 
+    test_group("linear: the AVX2 and SSE2 paths agree (1.4.1)");
+    # the default run above takes the AVX2 path on an AVX2 CPU; force SSE2 and
+    # repeat, then compare the two paths directly, bit for bit
+    _rosnet_force_sse2 = 1;
+    linear_ref_case("SSE2: 3x5x7", 3, 5, 7, 1);
+    linear_ref_case("SSE2: 2x9x13", 2, 9, 13, 1);
+    linear_ref_case("SSE2: 4x0x5", 4, 0, 5, 1);
+    blas1_case(7); blas1_case(8); blas1_case(13);   # t_add_into / t_scale on SSE2
+    _rosnet_force_sse2 = 0;
+    blas1_case(13); blas1_case(14); blas1_case(3);  # ... and on the 4-lane path's tails
+    paths_case("paths agree 4x16x300 (3 broadcast chunks)", 4, 16, 300);
+    paths_case("paths agree 3x7x771 (odd tail)", 3, 7, 771);
+    paths_case("paths agree 2x5x128 (exactly one chunk)", 2, 5, 128);
+    paths_case("paths agree 3x6x4 (one 4-lane group)", 3, 6, 4);
+
     test_group("conv fast paths vs 1.2.1 loops");
     conv_ref_case("3x3 pad 1", 2, 3, 6, 7, 4, 3, 3, 1, 1, 1, 1, 1);
     conv_ref_case("row of 300 (3 chunks)", 1, 2, 2, 300, 2, 1, 3, 1, 1, 0, 1, 1);
@@ -295,6 +310,27 @@ fn linear_ref_case(name, M, K, N, with_bias): i64 {
         assert(f64_gt(max_relerr(dW, rdW, K * N), tol) == 0, name);
     }
     if (with_bias == 1) { assert(bits_diff(db, rdb, nb) == 0, name); }
+    return 0;
+}
+
+# linear_fwd / linear_bwd under the default path and under forced SSE2: every
+# output bit-identical (on aarch64 both runs take the SSE2 path).
+fn paths_case(name, M, K, N): i64 {
+    var x = t_alloc(M * K); var W = t_alloc(K * N); var b = t_alloc(N); var dy = t_alloc(M * N);
+    t_randn(x, M * K, f64_from(1)); t_randn(W, K * N, f64_from(1));
+    t_randn(b, N, f64_from(1)); t_randn(dy, M * N, f64_from(1));
+    var y1 = t_alloc(M * N); var y2 = t_alloc(M * N);
+    var dx1 = t_alloc(M * K); var dx2 = t_alloc(M * K);
+    var dW1 = t_alloc(K * N); var dW2 = t_alloc(K * N); var db1 = t_alloc(N); var db2 = t_alloc(N);
+    linear_fwd(x, W, b, y1, M, K, N);
+    linear_bwd(x, W, dy, dx1, dW1, db1, M, K, N);
+    _rosnet_force_sse2 = 1;
+    linear_fwd(x, W, b, y2, M, K, N);
+    linear_bwd(x, W, dy, dx2, dW2, db2, M, K, N);
+    _rosnet_force_sse2 = 0;
+    var d = bits_diff(y1, y2, M * N) + bits_diff(dx1, dx2, M * K);
+    d = d + bits_diff(dW1, dW2, K * N) + bits_diff(db1, db2, N);
+    assert(d == 0, name);
     return 0;
 }
 

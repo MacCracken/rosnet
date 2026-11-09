@@ -27,7 +27,7 @@ modules = ["src/tensor.cyr", "src/linear.cyr", "src/conv.cyr"]
 modules = ["src/gpu.cyr"]
 
 [deps]
-stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math"]
+stdlib = ["string", "fmt", "alloc", "io", "vec", "str", "syscalls", "assert", "bench", "math", "simd"]
 
 # Sovereign deterministic statistical PRNG — supplies rng_seed / rng_normal for
 # t_randn (weight init). Pinned to the 1.2.2 release (the frozen 1.x surface; the

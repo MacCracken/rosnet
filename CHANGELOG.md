@@ -4,6 +4,65 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-09
+
+AVX2 for the packed kernels, adopted after the 1.4.0 measurement. No API change,
+and the same bits: the 15,302-line CPU golden dump is byte-identical on the AVX2
+path and on the SSE2 path.
+
+### Changed — faster, same bits
+
+- **`linear_fwd` and `linear_bwd`'s dW run 4 lanes wide on an AVX2 CPU.** There
+  is no 256-bit axpy, so the row step builds a 128-lane broadcast of x[m,k]
+  with one `f64v256_scale` of a ones row (a·1 = a exactly), then runs one
+  `f64v256_fmadd` per 128-lane chunk. That lowers to `vmulpd` then `vaddpd`,
+  not a fused op, so each element rounds as SSE2's `mulpd` + `addpd` did. The
+  path is chosen once per call by `simd_has_avx2()`, a cached CPUID probe that
+  always returns 0 on aarch64, so aarch64 is unchanged.
+- **`t_scale` and `t_add_into`** use `f64v256_scale` / `f64v256_add` on an
+  AVX2 CPU: one rounding per element on any width.
+- Measured on a Ryzen 7 5800H, in alternating processes, median of 5:
+
+  | Op | 1.4.0 | 1.4.1 |
+  |---|---:|---:|
+  | `linear_fwd` 64×768×768 | 12.27 ms | 11.40 ms (−7%) |
+  | `linear_bwd` 64×768×768 | 43.36 ms | 41.94 ms (−3%) |
+  | `t_scale` n=768 | 205 ns | 123 ns (1.7×) |
+  | `t_add_into` n=768 | 249 ns | 158 ns (1.6×) |
+  | **training step**: linear fwd + bwd, conv fwd + bwd, SGD update | 74.76 ms | 72.44 ms (−3.1%) |
+
+- **On this CPU, 256-bit work slows down what runs next.** In the full
+  benchmark harness, `conv2d_fwd` reads about 20% slower in 1.4.1 although its
+  code is unchanged. It runs right after the AVX2 rows, and the CPU is
+  power-limited; run alone it is within 3% (4.23 vs 4.34 ms). So per-op rows
+  can mislead, and the new end-to-end **training-step** row is the one that
+  says whether a real workload got faster. Here it did, by 3.1%.
+- **`linear_bwd`'s dW pass is its own function, `_ln_bwd_dW`.** Adding the
+  AVX2 path's three locals inside `linear_bwd` made its unrelated dx loop 8%
+  slower (47.06 vs 43.67 ms): cyrius keeps only a handful of locals in
+  registers per function. With dW split out, `linear_bwd`'s own text is 1.4.0's
+  except for the call, and it is 3% faster.
+
+### Consumer note — a new stdlib leaf
+
+`simd` joins `dist/rosnet.deps` (the CPU sidecar), and the bundle now begins
+with `include "lib/simd.cyr"`. None of the six consumers declares `simd`, and
+none needs to: the bundle's include covers it. The 1.4.1 bundle compiles under
+cyrius 6.6.2, the pin of five consumers, with the golden dump bit for bit. The
+256-bit builtins and `simd_has_avx2()` exist in 6.6.2, 6.6.20 and 6.7.9, all
+checked. The GPU sidecar is unchanged.
+
+### Added
+
+- **Both paths are tested on every run.** CI's runners have AVX2, so a
+  test-only switch (`_rosnet_force_sse2`, not API) forces the SSE2 path. The
+  suite runs the linear and BLAS-1 cases both ways and checks that the two
+  paths agree bit for bit, including rows over 128, N = 771 and K = 0 (54 → 70
+  assertions, 79 on aarch64). The fuzz harness alternates the paths each round.
+  It caught both mutants tried: a broadcast shorter than a chunk, and the wrong
+  accumulator for a later chunk.
+- A **training-step** benchmark row (see above).
+
 ## [1.4.0] - 2026-11-09
 
 GPU attention at real head sizes. No API change. Every CPU result is

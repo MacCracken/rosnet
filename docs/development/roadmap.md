@@ -10,7 +10,8 @@
 ([audit](../audit/2026-11-09-audit.md)) → **1.3.0** the sweep's open ends (GPU
 fixes validated on a device, untouched outputs on fallback, a soft shader-cache
 cap, sticky dispatch failure, an aarch64 CI leg) → **1.4.0** GPU attention at
-real head sizes (scores and dp tiled over hd: GPT-2's hd 64 runs on the device).
+real head sizes (scores and dp tiled over hd: GPT-2's hd 64 runs on the device)
+→ **1.4.1** AVX2 for the packed kernels (same bits; a training step −3.1%).
 
 **Carried over (lands in attn11, not here):**
 - attn11 moves to cyrius ≥ 6.6.19 before it takes any GPU bundle from 1.1.3 on
@@ -34,30 +35,6 @@ real head sizes (scores and dp tiled over hd: GPT-2's hd 64 runs on the device).
 - **A new stdlib leaf in a bundle's sidecar is consumer-facing**: say so in the
   CHANGELOG and check the six consumers' manifests first.
 
-## 1.4.1 — AVX2 for the packed AXPY (decided, scheduled)
-
-Bit-preserving (ADR 0002): a performance patch, not a numerical release. The
-decision to adopt it was made after the 1.4.0 measurement.
-
-- **What:** `linear_fwd` and `linear_bwd`'s dW (the same per-row AXPY) gain an
-  AVX2 path behind `simd_has_avx2()`. It builds a 128-lane broadcast of
-  x[m,k] with one `f64v256_scale` of a row of ones, then runs one
-  `f64v256_fmadd` per 128-lane chunk. That lowers to `vmulpd` + `vaddpd`, not a
-  fused op, so it is bit-identical to today's SSE2 `mulpd` + `addpd`. The
-  `n4` split and the scalar tail stay where they are. aarch64 never takes the
-  path, because the CPUID probe compiles out there.
-- **Measured in 1.4.0:** bit-identical (0 differing elements at N = 768 and
-  771) and ~9.5% faster at 64×768×768 (11.0 vs 12.1 ms, Ryzen 7 5800H,
-  interleaved). A two-pass `scale` + `add` variant was slower and is not the
-  plan.
-- **Consumer-facing:** the `simd` stdlib leaf joins the CPU sidecar, and none
-  of the six consumers declares it today. The CHANGELOG says so, and each
-  consumer's build is checked before the cut.
-- **Tests:** CI's runners have AVX2, so a test-only switch forces the SSE2
-  path, and the suite and fuzz harness check *both* paths against the oracles
-  in `tests/reference.cyr`. The golden dump must stay byte-identical on both.
-- **Also measure, adopt only if it pays:** `t_scale` / `t_add_into` through
-  `f64v256_scale` / `f64v256_add`.
 ## 1.x.x — demand-gated, unscheduled
 
 Each waits for a consumer that needs it. None is breaking.

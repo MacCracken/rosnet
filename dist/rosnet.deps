@@ -4,3 +4,4 @@ syscalls
 string
 fmt
 alloc
+simd

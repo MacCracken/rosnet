@@ -4,6 +4,54 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.2.1] - 2026-11-09
+
+A toolchain and dependency realign. No source change.
+
+### Changed
+
+- **Toolchain `6.7.9` → `6.7.18`** (through 6.7.10–6.7.17), the latest cyrius
+  release. `src/` is unchanged, and so is every value rosnet computes: 1.2.0's
+  7,462-word golden dump of raw f64 bit patterns is byte-identical at 6.7.18,
+  with tyche 1.2.2 in place. The GPU profile, which cannot run without its
+  device, gets a second dump. It runs each of the 24 SPIR-V shader builders in
+  `src/gpu.cyr` (27 calls) into a host buffer and prints every emitted word,
+  along with the Adam step's host-side `f64_pow` scalars and the GELU constant.
+  That is 18,167 lines, byte-identical under 6.6.20, 6.7.9 and 6.7.18, so it
+  also covers 1.1.3 and 1.2.0. **23 assertions** pass, the fuzz harness passes,
+  and fmt and lint are clean, including 6.7.11's and 6.7.12's new lint
+  warnings. Benchmarks did not move: on the same host, the medians of three
+  interleaved runs per toolchain are within 1% on every op. The smoke binary
+  shrinks from 175,248 to 174,752 B (31,888 to 31,392 B with DCE), all of it
+  from the stdlib and the toolchain.
+- **`[deps.tyche]` `1.2.0` → `1.2.2`**, the latest tyche, built against 6.7.18.
+  Every state its API can reach gives the same bits as 1.2.0, and
+  `rng_normal` is about 4% faster. Its one behaviour change is to a written
+  `_rng_state` of 0, which no longer hangs `rng_normal`. rosnet never writes
+  `_rng_state`.
+- **Vendored `lib/` re-synced** (`cyrius lib sync --full`). It byte-matches the
+  6.7.18 snapshot: the same 113 files as 6.7.9, 66 of them with new content.
+  Nothing was added or removed.
+- **`cyrius.lock` regenerated from scratch.** At 6.7.18, `cyrius deps` keeps
+  the old tyche pin on purpose and says so ("keeps tyche@1.2.0's pin …,
+  fail-closed; delete cyrius.lock to re-pin"). Deleting the lock and
+  re-resolving leaves one tyche line (`cdb74e2`) and the same 115 file hashes,
+  with trailer `cyrius 6.7.18`. `cyrius deps --verify` and
+  `cyrius deps --locked` are clean.
+- `dist/rosnet.cyr` and `dist/rosnet-gpu.cyr` change only in their version
+  line, and both sidecars are unchanged. The GPU bundle still relies on the
+  consumer's `puts` (see 1.1.3).
+
+### Note — the pin, `lib/` and `cyrius.lock` land together
+
+With a fully vendored `lib/`, cyrius refuses a moved pin until `lib/` follows
+it. Moving 1.2.0's pin to 6.7.18 alone makes both `cyrius deps` and
+`cyrius build` exit 1 with "cyrius.lock not re-locked: [package].cyrius moved
+from 6.7.9 to 6.7.18, and lib/ holds 47 files … that the 6.7.18 snapshot ships
+with other bytes", until `cyrius lib sync --full` runs. So a commit that moves
+the pin in `cyrius.cyml` without `lib/` and `cyrius.lock` fails CI at its
+`cyrius deps` step.
+
 ## [1.2.0] - 2026-11-09
 
 Moves rosnet onto the cyrius 6.7 series. No library or API change.

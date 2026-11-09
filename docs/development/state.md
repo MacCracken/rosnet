@@ -5,13 +5,15 @@
 
 ## Version
 
-**1.2.0 — 2026-11-09 (onto the cyrius 6.7 series).** No source or API
-change: cyrius `6.6.20` → `6.7.9`, tyche `1.1.1` → `1.2.0`, vendored `lib/`
-re-synced to the 6.7.9 snapshot, `cyrius.lock` regenerated, tests run as
-`cyrius test tests`. A 7,462-word golden dump of every CPU op is bit-identical
-to 1.1.3's; suite 23/23 unchanged.
+**1.2.1 — 2026-11-09 (toolchain + dependency realign).** No source change:
+cyrius `6.7.9` → `6.7.18` (the latest), tyche `1.2.0` → `1.2.2` (the latest),
+vendored `lib/` re-synced to the 6.7.18 snapshot, `cyrius.lock` regenerated.
+The 7,462-word golden dump of every CPU op is bit-identical to 1.2.0's, and so
+is an 18,167-line dump of every GPU SPIR-V builder's output (checked under
+6.6.20, 6.7.9 and 6.7.18); suite 23/23 unchanged.
 
-(**1.1.3** 2026-11-09 — cyrius → 6.6.20, tyche → 1.1.1; smaller sidecars; the
+(**1.2.0** 2026-11-09 — onto the cyrius 6.7 series: cyrius → 6.7.9, tyche →
+1.2.0, tests run as `cyrius test tests`. **1.1.3** 2026-11-09 — cyrius → 6.6.20, tyche → 1.1.1; smaller sidecars; the
 GPU bundle's reliance on the consumer's `puts` documented. **1.1.2** 2026-09-11 — cyrius → 6.6.2; fixed the GPU bundle's retired
 `payload` accessor. **1.1.1** 2026-08-17 — cyrius → 6.5.27, tyche → 1.0.1.)
 
@@ -38,17 +40,21 @@ the CPU oracle in attn11's 12-test GPU suite. **0.1.1** — scaffolded
 
 ## Toolchain
 
-- **Cyrius pin**: `6.7.9` (in `cyrius.cyml [package].cyrius`). **Bumped
-  6.6.20 → 6.7.9 on 2026-11-09.** 23/23 before and after, every CPU op's output
-  bit-identical, and an interleaved A/B benchmark shows no slowdown. `lib/`
-  byte-matches the 6.7.9 snapshot (113 files).
-- **Before the 6.7.12 bump:** `cyrius tests` is gone there (an unknown
-  command). CI and the README already use `cyrius test tests`.
+- **Cyrius pin**: `6.7.18` (in `cyrius.cyml [package].cyrius`), the latest
+  release. **Bumped 6.7.9 → 6.7.18 on 2026-11-09.** 23/23 before and after,
+  every CPU op's output bit-identical, and an interleaved A/B benchmark within
+  1%. `lib/` byte-matches the 6.7.18 snapshot (113 files).
+- **Bump procedure:** edit the pin → `cyrius lib sync --full` (cyrius refuses a
+  moved pin until this runs) → `cyrius deps` → if a git dep's tag moved, delete
+  `cyrius.lock` and run `cyrius deps` again (the lock keeps the old pin
+  fail-closed) → `cyrius distlib` + `cyrius distlib gpu`. Commit the pin,
+  `lib/` and `cyrius.lock` together, or CI's `cyrius deps` fails.
 - `lib/agnosys.cyr` is a leftover from the 2026-06-11 scaffold. It is in no
   6.6.x snapshot and nothing in `src/` or `tests/` uses it, but `lib sync` does
   not prune it, so it stays in `lib/` and in `cyrius.lock`.
 - Earlier: 6.2.11 → 6.5.27 (2026-08-17, ended the deliberate deep-lag),
-  6.5.27 → 6.6.2 (2026-09-11), 6.6.2 → 6.6.20 (2026-11-09).
+  6.5.27 → 6.6.2 (2026-09-11), 6.6.2 → 6.6.20 and 6.6.20 → 6.7.9
+  (2026-11-09).
 
 ## Source
 
@@ -61,9 +67,9 @@ the CPU oracle in attn11's 12-test GPU suite. **0.1.1** — scaffolded
   Linux-only), extracted whole from attn11 (M18/M19).
 - `src/main.cyr` — smoke demo (`main()` + `SYS_EXIT`; excluded from the bundle).
 
-CPU `[lib]` bundle → `dist/rosnet.cyr` (390 lines, v1.2.0; sidecar
+CPU `[lib]` bundle → `dist/rosnet.cyr` (390 lines, v1.2.1; sidecar
 `dist/rosnet.deps` = alloc, string, fmt, syscalls); GPU profile →
-`dist/rosnet-gpu.cyr` (2323 lines, v1.2.0; sidecar = mabda, math, result,
+`dist/rosnet-gpu.cyr` (2323 lines, v1.2.1; sidecar = mabda, math, result,
 ganita). Regenerate with `cyrius distlib` + `cyrius distlib gpu`; verify both
 with `cyrius distlib --all --check`. The GPU bundle calls `puts`, which no
 stdlib leaf defines — its consumer must supply it (attn11 does).
@@ -73,7 +79,7 @@ stdlib leaf defines — its consumer must supply it (attn11 does).
 - `tests/rosnet.tcyr` — primary suite: exact BLAS-1 checks, central
   finite-difference grad-checks of `linear_bwd` (dx/dW/db, rel err < 1e-5),
   conv known-answer + grad-checks, conv1d wrapper parity.
-  **23/23 passing** on `cyrius test tests` (at cyrius 6.7.9).
+  **23/23 passing** on `cyrius test tests` (at cyrius 6.7.18).
 - `tests/rosnet.bcyr` — the v1.0 benchmark harness (consumer-shaped sizes);
   numbers in [`docs/benchmarks.md`](../benchmarks.md).
 - `tests/rosnet.fcyr` — fuzz stub (no untrusted-data parsing on this surface —
@@ -84,8 +90,8 @@ stdlib leaf defines — its consumer must supply it (attn11 does).
 Direct (declared in `cyrius.cyml`):
 
 - stdlib — string, fmt, alloc, io, vec, str, syscalls, assert, bench, math
-- **tyche** (`1.2.0`, commit `2c393fe`; the release built against cyrius
-  6.7.9) — deterministic statistical PRNG; supplies
+- **tyche** (`1.2.2`, commit `cdb74e2`; the latest release, built against
+  cyrius 6.7.18) — deterministic statistical PRNG; supplies
   `rng_seed`/`rng_normal` for `t_randn`. The only non-stdlib dep; pure
   tensor/matmul ops need none. (The GPU profile additionally needs **mabda**,
   supplied by the consumer — rosnet declares no top-level mabda dep.)

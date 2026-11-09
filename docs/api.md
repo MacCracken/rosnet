@@ -81,17 +81,21 @@ consumer had to define). Every op **self-falls-back to CPU** (returns non-0)
 when the device is unavailable or the shape is outside what it handles: a
 non-positive dim; a dim off its tile multiple; a buffer past `GPU_BO_MAX()`; a
 grid past mabda's dispatch cap; a dim too large for its shader-cache key field;
-attention with `C % nh != 0` or a head dim over 32; or a full shader cache
-(1024 kernels). The gates and counters make engagement observable, never
-assumed.
+attention with `C % nh != 0` or a head dim over 32; or a kernel mabda refuses to
+compile (its 256-id cap — on cyrius 6.7.18 the untiled attention kernels compile
+only up to head dim 11 forward and 17 backward, so larger heads fall back today).
+A full shader cache is not a fallback: past 1024 cached kernels, new ones are
+compiled, dispatched once and released (1.3.0). The gates and counters make
+engagement observable, never assumed.
 
-**On a non-0 return, the outputs may be partially written** (e.g. `gpu_ln_fwd`'s
-mean/rstd, `gpu_linear_bwd`'s dx, `gpu_head_bwd`'s D_f, `gpu_attn_core_bwd`'s
-dQ/dV can be filled before a later stage falls back). The caller's CPU op must
-recompute **every** output — as attn11's fallbacks do. The accumulated outputs
-(`gpu_linear_bwd`'s dW / db, `gpu_head_bwd`'s gemb, `gpu_ln_bwd`'s dgamma /
-dbeta) are written only after the last stage that can fall back, so a fallback
-never adds a gradient twice.
+**On a non-0 return, the caller's outputs are untouched** (1.3.0): every entry
+reads its results back only after its last dispatch, so the caller's CPU op can
+start from the same state the GPU call saw. (In 1.2.2 and earlier, `gpu_ln_fwd`,
+`gpu_linear_bwd`, `gpu_head_bwd`, `gpu_ln_bwd` and `gpu_attn_core_bwd` could fill
+an output before a later stage fell back.) **A failing dispatch is sticky:** every
+shape is guarded before it reaches the device, so a dispatch error means the
+device or driver is in trouble, and every later GPU call in the process returns
+non-0 at once.
 
 **Provider note (orthogonal to this freeze):** the ops are validated bit-exact /
 ~1e-13 vs the CPU oracle on **AMD GFX9** (attn11's 12-test GPU suite); mabda 4.0

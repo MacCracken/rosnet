@@ -5,16 +5,16 @@
 
 ## Version
 
-**1.2.2 — 2026-11-09 (P(-1) hardening / optimization / repair sweep).**
-[`docs/audit/2026-11-09-audit.md`](../audit/2026-11-09-audit.md). Fixed a
-stack-buffer overflow in `gpu_attn_core` (no hd cap; hd = 64 overran
-`spv[8192]`), a wrong-result attention cache key, a leaking full shader cache,
-`t_alloc(0)` exiting the process, and eleven LOW guard / CI / test gaps.
-Kernels 1.6–13× faster with every output bit-identical to 1.2.1 (ADR 0002).
-Tests 23 → 114 assertions + a real property fuzzer. No public signature
-changed.
+**1.3.0 — 2026-11-09 (the 1.2.2 sweep's open ends).** GPU fixes validated on
+a GFX9 device (attn11's 12-test suite passes against this release); every GPU
+fallback leaves the caller's outputs untouched; a full shader cache is a soft
+limit (transient modules released after their dispatch); a failing dispatch is
+sticky; an aarch64 CI leg under qemu. CPU results and generated shaders
+byte-identical to 1.2.2. No API change.
 
-(**1.2.1** 2026-11-09 — cyrius → 6.7.18, tyche → 1.2.2. **1.2.0** 2026-11-09 — onto the cyrius 6.7 series: cyrius → 6.7.9, tyche →
+(**1.2.2** 2026-11-09 — the P(-1) sweep ([audit](../audit/2026-11-09-audit.md)):
+a GPU stack overflow, a wrong-result attention key, a leaking cache, `t_alloc(0)`
+exiting; kernels 1.6–13× faster, bit-identical. **1.2.1** 2026-11-09 — cyrius → 6.7.18, tyche → 1.2.2. **1.2.0** 2026-11-09 — onto the cyrius 6.7 series: cyrius → 6.7.9, tyche →
 1.2.0, tests run as `cyrius test tests`. **1.1.3** 2026-11-09 — cyrius → 6.6.20, tyche → 1.1.1; smaller sidecars; the
 GPU bundle's reliance on the consumer's `puts` documented. **1.1.2** 2026-09-11 — cyrius → 6.6.2; fixed the GPU bundle's retired
 `payload` accessor. **1.1.1** 2026-08-17 — cyrius → 6.5.27, tyche → 1.0.1.)
@@ -74,12 +74,14 @@ the CPU oracle in attn11's 12-test GPU suite. **0.1.1** — scaffolded
   stride-1 (along W) fwd / bwd run along the output row with packed ops.
 - `src/gpu.cyr` — GPU backend (`[lib.gpu]` profile, ADR 0001; mabda-gated,
   Linux-only), extracted whole from attn11 (M18/M19). Shader cache 1024
-  entries; every key field range-checked.
+  entries, a soft limit (kernels past it are compiled, dispatched once and
+  released); every key field range-checked; all dispatches go through
+  `_gpu_dispatch` (sticky on failure); outputs read back after the last dispatch.
 - `src/main.cyr` — smoke demo (`main()` + `SYS_EXIT`; excluded from the bundle).
 
-CPU `[lib]` bundle → `dist/rosnet.cyr` (640 lines, v1.2.2; sidecar
+CPU `[lib]` bundle → `dist/rosnet.cyr` (640 lines, v1.3.0; sidecar
 `dist/rosnet.deps` = syscalls, string, fmt, alloc); GPU profile →
-`dist/rosnet-gpu.cyr` (2406 lines, v1.2.2; sidecar = mabda, math, result,
+`dist/rosnet-gpu.cyr` (2489 lines, v1.3.0; sidecar = mabda, math, result,
 ganita, syscalls, string). Regenerate with `cyrius distlib --all`; verify with
 `cyrius distlib --all --check`. Since 1.2.2 the GPU bundle needs no symbol from
 its consumer beyond mabda.
@@ -89,10 +91,15 @@ its consumer beyond mabda.
 - `tests/rosnet.tcyr` — CPU suite: exact BLAS-1 checks, central
   finite-difference grad-checks of `linear_bwd` / `conv2d_bwd`, conv
   known-answer, conv1d parity (fwd + bwd), storage, and every optimized kernel
-  against the plain-loop oracles in `tests/reference.cyr`. **54/54**.
+  against the plain-loop oracles in `tests/reference.cyr`. **54/54** on x86_64,
+  **60/60** on aarch64 (qemu; the linear cases take the tolerance branch).
 - `tests/gpu_host.tcyr` — the GPU profile's host side, no device: cache
   capacity / full-cache behaviour, key fields, every SPIR-V builder within
-  `spv[8192]` at its guard limits. **60/60**.
+  `spv[8192]` at its guard limits, transient lifetime, sticky dispatch.
+  **71/71** (x86_64 and aarch64).
+- `tests/gpu_device.tcyr` — the GPU ops on a real device (SKIP without one):
+  bit-exact matmul, the attention cache-key pair, untouched outputs on a
+  late-stage fallback, the soft cache cap. **39/39** on a Radeon Vega (GFX9).
 - `tests/rosnet.fcyr` — seeded property fuzzer: 15,000 random shapes per run
   (±0 / subnormal / huge / ±Inf inputs) against the oracles; ~4 s.
 - `tests/rosnet.bcyr` — benchmarks (every BLAS-1 op, linear, conv2d, conv1d);
@@ -118,8 +125,9 @@ Direct (declared in `cyrius.cyml`):
 
 ## Next
 
-Post-1.0 additive lane (demand-gated): the f32/f16/bf16 wideners promotion;
-CPU optimizations that change bits (blocking/tiling, threads, AVX2, a wider dx
-reduction — ADR 0002 makes each a numerical change) when a consumer is
-throughput-blocked; GPU attention for head dims above ~26 (tile the hd loop).
-See [`roadmap.md`](roadmap.md).
+**1.4.x** — bit-preserving speed: GPU attention for real head sizes (tile the hd
+loop; today the forward compiles only to hd 11 and the backward dp to hd 17),
+an AVX2 path, a strided-conv fast path. Then demand-gated 1.x minors
+(wideners, quantized dtypes, numerical releases) and a 2.0.0 backlog of
+breaking changes nothing yet forces. Carried over: attn11's move to cyrius ≥
+6.6.19 (lands in attn11). See [`roadmap.md`](roadmap.md).

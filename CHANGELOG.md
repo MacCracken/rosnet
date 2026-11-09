@@ -4,6 +4,73 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-11-09
+
+Closes the 1.2.2 sweep's open ends ([`roadmap.md`](docs/development/roadmap.md)).
+No API change. Every CPU result and every generated GPU shader is byte-identical
+to 1.2.2 (the 15,302-line CPU golden dump and the 18,167-line SPIR-V builder
+dump).
+
+### Validated on a device
+
+- **The 1.2.2 GPU fixes, checked on hardware.** They had been verified on the
+  host only. On an AMD GFX9 GPU (Radeon Vega, Cezanne), attn11's 12-test GPU
+  suite passes against this release — six ops bit-exact to the CPU, six within
+  their tolerances. It was built from a scratch copy at cyrius 6.7.18; attn11
+  itself is unchanged.
+- **The attention-cache fix, reproduced.** With 1.2.1's code, `gpu_attn_core`
+  at head dim 8, called after head dim 4 with the same C and T, returns 0 and a
+  wrong `concat`. With 1.3.0 both match the CPU reference.
+
+### Changed
+
+- **A GPU fallback leaves the caller's outputs untouched.** Five entries wrote
+  an output, then a later stage could still fall back: `gpu_ln_fwd` (mean /
+  rstd), `gpu_linear_bwd` (dx), `gpu_head_bwd` (D_f), `gpu_ln_bwd` (dx) and
+  `gpu_attn_core_bwd` (dQ, dV). Each stage's result now stays in a device
+  buffer of its own, and every output is read back after the last dispatch.
+  `docs/api.md` restores the 1.0 wording.
+- **A full shader cache no longer sends ops to the CPU.** Past 1024 cached
+  kernels, a new kernel is compiled, dispatched once and released. Dispatch is
+  synchronous, and every call site dispatches the kernel it fetched exactly
+  once. 1.2.1 leaked a module per call here, and 1.2.2 fell back to the CPU.
+- **A failing dispatch is sticky.** Every shape is guarded before it reaches
+  the device, so a dispatch error means the device or driver is in trouble.
+  Every later GPU call now falls back at once instead of re-uploading up to
+  12 MB first. All 20 dispatch sites go through one wrapper, `_gpu_dispatch`.
+- Fewer host copies: `gpu_linear_bwd` uploads dy once, not twice, and
+  `gpu_head_bwd` uploads D_logits once, not twice.
+- Cache keys no longer include values their kernels do not bake in: C and hd
+  for rowmax, expsum and dot_t (their builders never take them), and M for
+  lnbwd_param (its SPIR-V is byte-identical across M, checked). Those shapes
+  now share kernels.
+
+### Added
+
+- **`tests/gpu_device.tcyr`**, 39 assertions run on the device. It covers
+  bit-exact matmul, the attention cache-key pair, the guard fallbacks, the soft
+  cache cap, and every multi-stage entry's outputs staying untouched when its
+  last stage falls back. To force that, the test marks the last stage's kernel
+  as a known compile failure, and checks that the earlier stages ran. Without a
+  device the file prints SKIP and exits 0 (checked with `/dev/dri` hidden). It
+  catches 1.2.1's attention code and a moved-back `dx` readback.
+- `tests/gpu_host.tcyr` 60 → 71 assertions: transient module lifetime, and the
+  sticky dispatch failure.
+- **An aarch64 CI leg** under qemu-user, same shape as tyche's. It runs the CPU
+  suite (60 assertions on aarch64, where the linear cases take the tolerance
+  branch), the GPU host tests and the fuzz harness. This is the first time
+  rosnet's per-target numerical claims actually run on aarch64; all hold,
+  including the conv and BLAS-1 kernels matching the plain loops bit for bit.
+
+### Documentation
+
+- **Correction: GPU attention's head-dim limits.** The 1.2.2 audit estimated
+  that forward attention compiles up to hd ≈ 26, from the SPIR-V id bound
+  alone. mabda's compiler also needs ids for the values it synthesizes. On the
+  device at cyrius 6.7.18, the forward scores kernel compiles only up to
+  **hd 11**, and the backward dp kernel up to **hd 17**. Corrected in the audit,
+  `docs/api.md`, the roadmap and `src/gpu.cyr`.
+
 ## [1.2.2] - 2026-11-09
 
 The P(-1) hardening, optimization and repair sweep, recorded in

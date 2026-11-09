@@ -1,64 +1,94 @@
 # rosnet — Roadmap
 
-> Milestone plan through v1.0. State lives in [`state.md`](state.md);
-> this file is the sequencing — what ships, in what order, against
-> what dependency gates.
+> The sequencing: what ships next, in what order, against what gates. Current
+> state lives in [`state.md`](state.md); what already shipped lives in
+> [`CHANGELOG.md`](../../CHANGELOG.md).
 
-## v1.0 criteria — ✅ ALL MET (1.0.0 cut 2026-07-04)
+**Shipped so far:** 0.1 scaffold → 0.2 GPU profile (ADR 0001) → **1.0.0 freeze**
+(2026-07-04) → 1.1.0 conv2d / conv1d → 1.1.1 – 1.2.1 toolchain realigns →
+**1.2.2** P(-1) hardening / optimization sweep
+([audit](../audit/2026-11-09-audit.md)) → **1.3.0** the sweep's open ends: GPU
+fixes validated on a device, fallbacks leave outputs untouched, a soft shader-
+cache cap, sticky dispatch failure, an aarch64 CI leg.
 
-- [x] Public API frozen — every exported symbol documented and tested (`docs/api.md`)
-- [x] Test coverage adequate for the surface area (7/7 incl. central-FD grad-checks; GPU validated in-consumer vs the CPU oracle)
-- [x] Benchmarks captured in `docs/benchmarks.md` (v1.0 capture, Ryzen 7 5800H)
-- [x] At least one downstream consumer green — **six** (attn11, tarka, tentib, prajna, rupantara, anukūlana)
-- [x] CHANGELOG complete from v0.1.0 onward
-- [x] Security audit pass (`docs/audit/2026-07-04-audit.md` — PASS, 0 code changes; the no-bounds-checks substrate contract audited as deliberate)
+**Carried over (lands in attn11, not here):** attn11 moves to cyrius ≥ 6.6.19
+before it takes any GPU bundle from 1.1.3 on (the distlib include prelude). Its
+12-test GPU suite already passes against rosnet 1.3.0 at cyrius 6.7.18.
 
-## Milestones
+## Rules for every 1.x release
 
-### M0 — Scaffold (v0.1.0) — ✅ shipped 2026-06-11
+- **The public surface is frozen** ([`docs/api.md`](../api.md)). A 1.x minor
+  only adds; nothing listed there changes signature or meaning.
+- **Optimizations keep the bits** ([ADR 0002](../adr/0002-kernel-optimizations-preserve-bits.md)):
+  every output keeps its sequence of roundings, proven by the raw-bit golden
+  dump and the oracles in `tests/reference.cyr`. Such work can ride any patch.
+- **A change that moves bits is a numerical release**: its own minor, a
+  CHANGELOG entry saying which outputs move and by how much, and a heads-up to
+  the consumers whose suites compare bit patterns (attn11's bit-exact GPU
+  class, byte-reproducible training).
+- **A new stdlib leaf in a bundle's sidecar is consumer-facing**: say so in the
+  CHANGELOG and check the six consumers' manifests first.
 
-- `cyrius init` scaffold landed
-- Doc-tree per [first-party-documentation.md](https://github.com/MacCracken/agnosticos/blob/main/docs/development/applications/first-party-documentation.md)
-- ADRs / architecture notes / guides / examples folders ready
+## 1.4.x — bit-preserving speed
 
-### M1 — GPU backend (v0.2.0) — ✅ shipped 2026-06-21
+Each item keeps every output's rounding sequence (ADR 0002), so it is a
+performance minor, not a numerical one.
 
-- `src/gpu.cyr` added as a separate `[lib.gpu]` profile → `dist/rosnet-gpu.cyr`
-  (ADR 0001), extracted whole from attn11 (M18/M19): native-AMD f64 SPIR-V on
-  mabda — GPU foundation + generic tensor ops + transformer ops.
-- CPU `[lib]` bundle left byte-identical (mabda-free); GPU consumers import the
-  GPU bundle and declare `[deps.mabda]` (Linux-only).
-- Validated bit-exact / ~1e-13 vs the CPU oracle in attn11 (1.10.0, GPU suite).
+- **GPU attention for real head sizes.** The untiled scores (forward) and dp
+  (backward) kernels exceed mabda's 256-id cap — measured on a GFX9 device at
+  cyrius 6.7.18 they compile only up to hd 11 and hd 17 — so GPT-2's hd = 64,
+  and even hd = 16, fall back today. Tile their hd loops as attn11 1.9.0 tiled
+  the T loops, then lift the `hd ≤ 32` guards (keeping every builder within
+  `spv[8192]`, which `tests/gpu_host.tcyr` pins).
+- **AVX2 path** for the packed kernels: `f64v256_fmadd` / `_scale` / `_add`
+  lower to `vmulpd` + `vaddpd` — the same two roundings as SSE2 — behind
+  `simd_has_avx2()`. That adds the `simd` stdlib leaf to the CPU sidecar, so it
+  needs the consumer check above.
+- **Strided conv (SW > 1) fast path:** gather each input run into a contiguous
+  row, then the same packed scale + add as the stride-1 path. Same order, same
+  bits.
 
-### M2 — v1.0 freeze (v1.0.0) — ✅ shipped 2026-07-04
+## 1.x.x — demand-gated, unscheduled
 
-- Public surface frozen (`docs/api.md`): CPU bundle + GPU profile both ride the
-  freeze — mabda 4.x churn is provider-level (4.0 added basic NVIDIA), not the
-  device/dispatch API the profile layers on.
-- Benchmarks captured (`docs/benchmarks.md`), audit passed (`docs/audit/`),
-  no behavior change from 0.2.0 (a tarka-style clean cut).
+Each waits for a consumer that needs it. None is breaking.
 
-## Post-1.0 (additive 1.x minors, demand-gated)
+- **IEEE-754 wideners** (f32 / f16 / bf16 → f64): promote from anukūlana's
+  importer once a second consumer (a GGUF parser or another importer) needs it.
+- **Quantized dtypes:** these step outside the caller-guarantees contract (they
+  read data, not caller pointers), so the loader must bounds-check like
+  tula's / anukūlana's parsers (the 1.0 audit's standing guidance).
+- **Numerical releases** (each its own minor under the rules above), when a
+  consumer is throughput-blocked:
+  - blocked / tiled matmul (a different k-order per output);
+  - threads (per-thread partial sums);
+  - a wider `linear_bwd` dx reduction (more lanes);
+  - packed `t_axpy` (adds aarch64's fused-multiply-add divergence to it);
+  - im2col-based conv.
 
-- **conv2d / conv1d fwd+bwd — ✅ LANDED 2026-07-05** (**cut as 1.1.0**, 2026-07-05): NCHW, per-axis stride/pad, hand-derived dx/dW/db, FD-gated
-  across strided/padded/non-square configs + conv1d bit-parity; suite 7→23;
-  benched. Opens the modality axis (sight proof next) AND Type-4 diffusion.
-- **IEEE-754 wideners** (f32/f16/bf16→f64) — promotion candidate from
-  anukūlana's importer on a second consumer (GGUF parser / another importer).
-- **CPU kernel optimization** — 1.2.2 (P(-1) sweep) took the bit-identical
-  wins: `linear_fwd` / dW as one packed AXPY per row (2.2–2.7×), stride-1 conv
-  along the output row (fwd 8–13×, bwd 3–3.6×), packed `t_scale` /
-  `t_add_into`. What remains changes bits or the bundle's leaves, so it waits
-  for a consumer that is throughput-blocked: blocking/tiling, threads, AVX2
-  (`f64v256_*` behind a runtime CPU check), a wider dx reduction, im2col for
-  strided conv.
-- **Quantized dtypes** — steps outside the caller-guarantees contract; must
-  bounds-check like tula/anukūlana parsers (see the audit's standing guidance).
+## 2.0.0 backlog — breaking, only if a consumer forces it
 
-## Out of scope (for 1.x)
+Nothing here is planned. Each item would break the frozen 1.x contract, so it
+waits until a real consumer need outweighs migrating six consumers.
 
-- Bounds/shape checking on the hot path — the audited substrate contract is
-  caller-guarantees; revisiting it is a 2.0 question.
-- A murti-style resident-model/runtime layer (hoosh's seam, per
+- **Hot-path bounds / shape checking.** The audited substrate contract is
+  caller-guarantees; checking every call is a contract change, and per-element
+  checks would tax the loops rosnet exists to provide.
+- **A shape-carrying tensor handle** instead of a raw pointer plus caller-held
+  dims. It is what would make the checks above cheap (one check per call) and
+  what broadcasting or views would need.
+- **Error returns instead of exiting.** `t_alloc` exits on failure by contract;
+  a library that returns errors changes every call site.
+- **GPU control as API:** an explicit context or flags instead of the
+  consumer-set globals `g_gpu` / `g_gpu_tc`, and fallback reason codes instead
+  of a bare non-0.
+- **One cross-target numerical contract.** Today x86_64 rounds the packed
+  multiply-add twice and aarch64 once, so `linear_fwd` / `linear_bwd` differ in
+  the last bits between them. Making them agree either costs aarch64 its fused
+  path or moves every x86_64 result — a contract decision, not a patch.
+
+## Out of scope
+
+- A murti-style resident-model / runtime layer (hoosh's seam, per
   `agnosticos docs/development/planning/murti.md`).
-- GPU provider work (mabda's surface, not rosnet's).
+- GPU provider work: devices, drivers, other vendors (mabda's surface, not
+  rosnet's).

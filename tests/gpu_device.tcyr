@@ -1,0 +1,278 @@
+# rosnet GPU profile — device tests (need a native AMD f64 GPU; SKIP cleanly without one).
+#
+# tests/gpu_host.tcyr covers what runs on the host; this file runs the ops on the
+# device and checks what only a device run can show:
+#   - matmul is bit-exact against linear_fwd (the CPU oracle);
+#   - the forward-attention shader-cache key includes the head dim: two head
+#     counts sharing (C, T) each match the CPU reference (before 1.2.2 the second
+#     reused the first's kernel and returned a wrong result with rc 0);
+#   - a fallback leaves every caller output untouched (1.3.0): each multi-stage
+#     entry is made to fail at its LAST stage — that stage's kernel is marked a
+#     known compile-fail in the cache — after the earlier stages ran on the device;
+#   - a full shader cache is a soft limit (1.3.0): the op still runs on the device
+#     with its kernels compiled as transients and released after their dispatch.
+# The attention reference is attn11's tests/gpu_attn.cyr cpu_attn (identical to
+# its attn_core_fwd: causal MHA, 4-lane-tree QK dot, softmax over j <= i,
+# sequential PV), with the same deterministic fill.
+include "lib/mabda.cyr"
+include "lib/result.cyr"
+include "lib/ganita.cyr"
+include "src/gpu.cyr"
+include "src/tensor.cyr"
+include "src/linear.cyr"
+include "src/conv.cyr"
+include "tests/reference.cyr"
+
+fn fill(buf, n, seed): i64 {
+    var i = 0;
+    while (i < n) {
+        var h = ((seed * 2654435761) + (i * 40503)) % 1000;
+        if (h < 0) { h = h + 1000; }
+        store64(buf + i * 8, f64_div(f64_from(h - 500), f64_from(100)));
+        i = i + 1;
+    }
+    return 0;
+}
+
+# Fill with a NaN sentinel the ops never produce, and keep a copy to compare.
+fn sentinel(p, n): i64 {
+    var i = 0;
+    while (i < n) { store64(p + i * 8, 0x7FF4000000000BAD + i); i = i + 1; }
+    return 0;
+}
+
+fn untouched(p, n): i64 {
+    var i = 0;
+    while (i < n) {
+        if (load64(p + i * 8) != (0x7FF4000000000BAD + i)) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+# Append key -> -1 ("known compile-fail") and return its slot, so the getter for
+# that key returns 0 and its stage falls back; unpoison() retires the slot.
+fn poison(key): i64 {
+    var slot = _gpu_cn;
+    _gpu_cache_put(key, 0 - 1);
+    return slot;
+}
+
+fn unpoison(slot): i64 {
+    store64(&_gpu_ck + slot * 8, 0x7FFFFFFFFFFFFFFF);   # a key no getter builds
+    return 0;
+}
+
+fn cpu_attn(Qc, Kc, Vc, concat, T, C, hd, Ckv, nh, scale): i64 {
+    var hd4 = hd - (hd % 4);
+    var prow[512];
+    var h = 0;
+    while (h < nh) {
+        var base = h * hd; var kvb = h * hd;
+        var i = 0;
+        while (i < T) {
+            var qbase = Qc + (i * C + base) * 8;
+            var j = 0;
+            while (j <= i) {
+                var kbase = Kc + (j * Ckv + kvb) * 8;
+                var a0 = f64_from(0); var a1 = f64_from(0); var a2 = f64_from(0); var a3 = f64_from(0);
+                var d = 0;
+                while (d < hd4) {
+                    a0 = f64_add(a0, f64_mul(load64(qbase + d * 8), load64(kbase + d * 8)));
+                    a1 = f64_add(a1, f64_mul(load64(qbase + (d + 1) * 8), load64(kbase + (d + 1) * 8)));
+                    a2 = f64_add(a2, f64_mul(load64(qbase + (d + 2) * 8), load64(kbase + (d + 2) * 8)));
+                    a3 = f64_add(a3, f64_mul(load64(qbase + (d + 3) * 8), load64(kbase + (d + 3) * 8)));
+                    d = d + 4;
+                }
+                var dot = f64_add(f64_add(a0, a1), f64_add(a2, a3));
+                while (d < hd) { dot = f64_add(dot, f64_mul(load64(qbase + d * 8), load64(kbase + d * 8))); d = d + 1; }
+                store64(&prow + j * 8, f64_mul(dot, scale));
+                j = j + 1;
+            }
+            var mx = load64(&prow);
+            j = 1;
+            while (j <= i) { var s = load64(&prow + j * 8); if (f64_gt(s, mx) == 1) { mx = s; } j = j + 1; }
+            var sum = f64_from(0);
+            j = 0;
+            while (j <= i) {
+                var e = f64_exp(f64_sub(load64(&prow + j * 8), mx));
+                store64(&prow + j * 8, e); sum = f64_add(sum, e); j = j + 1;
+            }
+            var inv = f64_div(f64_from(1), sum);
+            j = 0;
+            while (j <= i) { store64(&prow + j * 8, f64_mul(load64(&prow + j * 8), inv)); j = j + 1; }
+            var cbase = concat + (i * C + base) * 8;
+            var dz = 0;
+            while (dz < hd) { store64(cbase + dz * 8, f64_from(0)); dz = dz + 1; }
+            j = 0;
+            while (j <= i) {
+                var pij = load64(&prow + j * 8);
+                var vbase = Vc + (j * Ckv + kvb) * 8;
+                var d2 = 0;
+                while (d2 < hd) {
+                    store64(cbase + d2 * 8, f64_add(load64(cbase + d2 * 8), f64_mul(pij, load64(vbase + d2 * 8))));
+                    d2 = d2 + 1;
+                }
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        h = h + 1;
+    }
+    return 0;
+}
+
+# 1 if every |a - b| <= 1e-10 + 1e-10·|b|.
+fn allclose(a, b, n): i64 {
+    var tol = f64_div(f64_from(1), f64_from(10000000000));
+    var i = 0;
+    while (i < n) {
+        var r = load64(b + i * 8);
+        var err = f64_abs(f64_sub(load64(a + i * 8), r));
+        if (f64_gt(err, f64_add(tol, f64_mul(tol, f64_abs(r)))) == 1) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn matmul_case(name, M, K, N): i64 {
+    var x = t_alloc(M * K); var W = t_alloc(K * N); var b = t_alloc(N);
+    fill(x, M * K, 3); fill(W, K * N, 5); fill(b, N, 11);
+    var y = t_alloc(M * N); var ry = t_alloc(M * N);
+    linear_fwd(x, W, b, ry, M, K, N);
+    var before = gpu_mm_count();
+    assert(gpu_matmul_fwd(x, W, b, y, M, K, N) == 0, name);
+    assert(gpu_mm_count() == before + 1, name);
+    assert(bits_diff(y, ry, M * N) == 0, name);
+    return 0;
+}
+
+# must_run = 1: the op must run on the device and match the CPU reference.
+# must_run = 0: either it runs and matches, or it falls back with concat untouched
+# (a shape whose kernel mabda may refuse) — never a wrong answer.
+fn attn_case(name, T, C, nh, must_run): i64 {
+    var hd = C / nh;
+    var scale = f64_div(f64_from(1), f64_sqrt(f64_from(hd)));
+    var Q = t_alloc(T * C); var Kc = t_alloc(T * C); var V = t_alloc(T * C);
+    var P = t_alloc(nh * T * T); var ref = t_alloc(T * C); var out = t_alloc(T * C);
+    fill(Q, T * C, 1); fill(Kc, T * C, 7); fill(V, T * C, 13);
+    cpu_attn(Q, Kc, V, ref, T, C, hd, C, nh, scale);
+    sentinel(out, T * C);
+    var rc = gpu_attn_core(Q, Kc, V, P, out, T, C, nh, nh);
+    if (must_run == 1) { assert(rc == 0, name); }
+    if (rc == 0) { assert(allclose(out, ref, T * C) == 1, name); }
+    else { assert(untouched(out, T * C) == 1, name); }
+    return 0;
+}
+
+fn main() {
+    alloc_init();
+    if (_gpu_init() == 0) {
+        println("gpu_device: SKIP (no native AMD f64 GPU; tests/gpu_host.tcyr covers the host side)");
+        return 0;
+    }
+
+    test_group("matmul on the device");
+    matmul_case("matmul 8x32x12 bit-exact", 8, 32, 12);
+    matmul_case("matmul 3x16x5 bit-exact", 3, 16, 5);
+
+    test_group("attention cache key includes hd (1.2.2)");
+    # same (C, T); hd 4 then 8. Before 1.2.2 the second call reused hd 4's kernels.
+    attn_case("attn T=16 C=32 nh=8 (hd 4)", 16, 32, 8, 1);
+    attn_case("attn T=16 C=32 nh=4 (hd 8) after nh=8", 16, 32, 4, 1);
+    attn_case("attn T=16 C=32 nh=8 again", 16, 32, 8, 1);
+    # hd 16: the untiled scores kernel exceeds mabda's id cap on cyrius 6.7.18
+    # (forward compiles to hd 11) — it must fall back cleanly, or match if it runs
+    attn_case("attn T=16 C=64 nh=4 (hd 16): run or clean fallback", 16, 64, 4, 0);
+    # guards that fall back before touching anything
+    var gq = t_alloc(16 * 128); var go = t_alloc(16 * 128); var gp = t_alloc(2 * 16 * 16);
+    sentinel(go, 16 * 128);
+    assert(gpu_attn_core(gq, gq, gq, gp, go, 16, 128, 2, 2) != 0, "attn hd = 64 > 32 falls back");
+    assert(gpu_attn_core(gq, gq, gq, gp, go, 16, 100, 8, 8) != 0, "attn C % nh != 0 falls back");
+    assert(untouched(go, 16 * 128) == 1, "... with concat untouched");
+
+    test_group("a fallback leaves outputs untouched (1.3.0)");
+    # gpu_ln_fwd: passes 1 and 2 run, pass 3 (kind 3) falls back
+    var M = 8; var C = 32;
+    var lx = t_alloc(M * C); var lg = t_alloc(C); var lb = t_alloc(C);
+    fill(lx, M * C, 2); fill(lg, C, 4); fill(lb, C, 6);
+    var ly = t_alloc(M * C); var lmu = t_alloc(M); var lrs = t_alloc(M);
+    sentinel(ly, M * C); sentinel(lmu, M); sentinel(lrs, M);
+    var s1 = poison((3 << 56) | (C << 20));
+    assert(gpu_ln_fwd(lx, lg, lb, ly, lmu, lrs, M, C) != 0, "ln_fwd: pass 3 falls back");
+    assert(_gpu_cache_get((2 << 56) | (C << 20) | 16) > 0, "ln_fwd: pass 2 ran first");
+    assert((untouched(ly, M * C) & untouched(lmu, M) & untouched(lrs, M)) == 1,
+      "ln_fwd: y / mean / rstd untouched");
+    unpoison(s1);
+    assert(gpu_ln_fwd(lx, lg, lb, ly, lmu, lrs, M, C) == 0, "ln_fwd runs once unpoisoned");
+
+    # gpu_linear_bwd: the dx phase runs, the dW phase (tile_dw m0 = 0) falls back
+    var bM = 16; var bK = 8; var bN = 16;
+    var bx = t_alloc(bM * bK); var bW = t_alloc(bK * bN); var bdy = t_alloc(bM * bN);
+    fill(bx, bM * bK, 8); fill(bW, bK * bN, 9); fill(bdy, bM * bN, 10);
+    var bdx = t_alloc(bM * bK); var bdW = t_alloc(bK * bN); var bdb = t_alloc(bN);
+    sentinel(bdx, bM * bK); sentinel(bdW, bK * bN); sentinel(bdb, bN);
+    var s2 = poison((10 << 56) | (bK << 28) | (bN << 14));
+    assert(gpu_linear_bwd(bx, bW, bdy, bdx, bdW, bdb, bM, bK, bN) != 0, "linear_bwd: dW phase falls back");
+    assert(_gpu_cache_get((5 << 56) | (bN << 28) | (bK << 14)) > 0, "linear_bwd: dx phase ran first");
+    assert((untouched(bdx, bM * bK) & untouched(bdW, bK * bN) & untouched(bdb, bN)) == 1,
+      "linear_bwd: dx / dW / db untouched");
+    unpoison(s2);
+
+    # gpu_head_bwd: the D_f phase runs, the gemb phase (tile_dw m0 = 0) falls back
+    var hT = 16; var hV = 32; var hC = 16;
+    var hDl = t_alloc(hT * hV); var hE = t_alloc(hV * hC); var hA = t_alloc(hT * hC);
+    fill(hDl, hT * hV, 12); fill(hE, hV * hC, 14); fill(hA, hT * hC, 15);
+    var hDf = t_alloc(hT * hC); var hge = t_alloc(hV * hC);
+    sentinel(hDf, hT * hC); sentinel(hge, hV * hC);
+    var s3 = poison((10 << 56) | (hV << 28) | (hC << 14));
+    assert(gpu_head_bwd(hDl, hE, hA, hDf, hge, hT, hV, hC) != 0, "head_bwd: gemb phase falls back");
+    assert(_gpu_cache_get(_gpu_pack(hV, hC, 16)) > 0, "head_bwd: D_f phase ran first");
+    assert((untouched(hDf, hT * hC) & untouched(hge, hV * hC)) == 1, "head_bwd: D_f / gemb untouched");
+    unpoison(s3);
+
+    # gpu_ln_bwd: P1 and P3 (dx) run, P2 (lnbwd_param m0 = 0) falls back
+    var nx = t_alloc(M * C); var ndy = t_alloc(M * C); var nmu = t_alloc(M); var nrs = t_alloc(M);
+    fill(nx, M * C, 16); fill(ndy, M * C, 17); fill(nmu, M, 18); fill(nrs, M, 19);
+    var ndx = t_alloc(M * C); var ndg = t_alloc(C); var ndb = t_alloc(C);
+    sentinel(ndx, M * C); sentinel(ndg, C); sentinel(ndb, C);
+    var s4 = poison((14 << 56) | (C << 28));
+    assert(gpu_ln_bwd(nx, lg, ndy, nmu, nrs, ndx, ndg, ndb, M, C) != 0, "ln_bwd: P2 falls back");
+    assert(_gpu_cache_get((15 << 56) | (C << 14) | M) > 0, "ln_bwd: P3 (dx) ran first");
+    assert((untouched(ndx, M * C) & untouched(ndg, C) & untouched(ndb, C)) == 1,
+      "ln_bwd: dx / dgamma / dbeta untouched");
+    unpoison(s4);
+
+    # gpu_attn_core_bwd: A-D run (dQ computed), E (kind 20, t0 = 0) falls back
+    var aT = 16; var aC = 32; var anh = 4; var ahd = aC / anh;
+    var aQ = t_alloc(aT * aC); var aK = t_alloc(aT * aC); var aV = t_alloc(aT * aC);
+    var aP = t_alloc(anh * aT * aT); var adc = t_alloc(aT * aC); var acat = t_alloc(aT * aC);
+    fill(aQ, aT * aC, 21); fill(aK, aT * aC, 22); fill(aV, aT * aC, 23); fill(adc, aT * aC, 24);
+    assert(gpu_attn_core(aQ, aK, aV, aP, acat, aT, aC, anh, anh) == 0, "attn fwd fills P");
+    var adQ = t_alloc(aT * aC); var adK = t_alloc(aT * aC); var adV = t_alloc(aT * aC);
+    sentinel(adQ, aT * aC); sentinel(adK, aT * aC); sentinel(adV, aT * aC);
+    var s5 = poison((20 << 56) | (aC << 34) | (ahd << 27) | (aT << 16) | 16);
+    assert(gpu_attn_core_bwd(aQ, aK, aV, aP, adc, adQ, adK, adV, 0, aT, aC, anh, anh) != 0,
+      "attn_core_bwd: E falls back");
+    var dq_key = (19 << 56) | (aC << 34) | (ahd << 27) | (aT << 16) | 16;
+    assert(_gpu_cache_get(dq_key) > 0, "attn_core_bwd: D (dQ) ran first");
+    assert((untouched(adQ, aT * aC) & untouched(adK, aT * aC) & untouched(adV, aT * aC)) == 1,
+      "attn_core_bwd: dQ / dK / dV untouched");
+    unpoison(s5);
+
+    test_group("a full shader cache is a soft limit (1.3.0)");
+    var saved = _gpu_cn;
+    var k = _gpu_cn;
+    while (k < _GPU_CACHE_CAP()) { _gpu_cache_put((63 << 56) | k, 9); k = k + 1; }   # inert entries
+    var before = gpu_mm_count();
+    matmul_case("matmul 4x48x8 with the cache full", 4, 48, 8);
+    assert(gpu_mm_count() == before + 1, "ran on the device, not the CPU");
+    assert(_gpu_cn == _GPU_CACHE_CAP(), "nothing was cached");
+    assert(_gpu_trn == 0, "every transient was released after its dispatch");
+    _gpu_cn = saved;
+
+    return assert_summary();
+}
+
+var exit_code = main();
+syscall(SYS_EXIT, exit_code);

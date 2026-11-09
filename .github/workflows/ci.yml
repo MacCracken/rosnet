@@ -95,8 +95,32 @@ jobs:
         # tests/gpu_host.tcyr checks the GPU profile's host side — shader-cache
         # bookkeeping, key fields, and every SPIR-V builder fitting its buffer —
         # which needs no device. cyrius 6.7.6 deprecated the plural
-        # `cyrius tests` (it warns) and 6.7.12 removes it.
+        # `cyrius tests` (it warns) and 6.7.12 removes it. tests/gpu_device.tcyr runs the
+        # GPU ops on a real device and SKIPS (exit 0) on a runner without one.
         run: cyrius test tests
+
+      - name: Tests + fuzz on aarch64 (qemu-user)
+        # docs/api.md's numerical contract differs by target: cyrius lowers the packed
+        # multiply-add to a fused FMLA on aarch64, so linear's vector body rounds once
+        # there, while the conv / BLAS-1 kernels must stay bit-identical to the plain
+        # loops on BOTH targets. Those claims, and the suite's tolerance branches
+        # (_packed_fma_exact() == 0), only run on aarch64. Fails rather than skips when
+        # the cross-compiler or qemu is missing: a skipped gate would report green over
+        # exactly what it exists to check. (Same shape as tyche's aarch64 leg.)
+        run: |
+          [ -x "$HOME/.cyrius/bin/cycc_aarch64" ] || {
+            echo "::error::cycc_aarch64 not shipped with this Cyrius; cannot test the aarch64 half"; exit 1; }
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq qemu-user || sudo apt-get install -y -qq qemu-user-static
+          QEMU="$(command -v qemu-aarch64 || command -v qemu-aarch64-static)" || {
+            echo "::error::no qemu-aarch64 binary after install"; exit 1; }
+          mkdir -p build
+          for t in rosnet gpu_host; do
+            cyrius build --aarch64 "tests/$t.tcyr" "build/$t-a64"
+            "$QEMU" "build/$t-a64"
+          done
+          CYRIUS_DCE=1 cyrius build --aarch64 tests/rosnet.fcyr build/rosnet-fuzz-a64
+          timeout 300 "$QEMU" build/rosnet-fuzz-a64
 
       - name: Benchmarks
         run: CYRIUS_DCE=1 cyrius bench tests/rosnet.bcyr

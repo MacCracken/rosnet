@@ -55,7 +55,9 @@ buffer object, every grid within mabda's dispatch cap, every shader-cache key
 field in range, and the untiled attention builders capped at head dim 32 so a
 shader fits its build buffer (before 1.2.2 the forward attention path had no
 such cap and overran a stack buffer at head dim 64). Anything outside those
-bounds falls back to the CPU op. This surface is **Linux/DRM-only** and absent
+bounds falls back to the CPU op, leaving the caller's outputs untouched (since
+1.3.0), and a failing dispatch disables the GPU path for the rest of the
+process. This surface is **Linux/DRM-only** and absent
 from the default CPU bundle and the AGNOS build — a CPU-only consumer never
 links it. It is validated for correctness (bit-exact / ~1e-13 vs the CPU oracle
 in the attn11 consumer); its device trust boundary is mabda's.

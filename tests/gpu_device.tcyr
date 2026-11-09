@@ -51,15 +51,30 @@ fn untouched(p, n): i64 {
     return 1;
 }
 
-# Append key -> -1 ("known compile-fail") and return its slot, so the getter for
-# that key returns 0 and its stage falls back; unpoison() retires the slot.
+# Make key read as -1 ("known compile-fail") so its getter returns 0 and that stage
+# falls back. If an earlier test already cached a real kernel under the key, that
+# entry is overridden (a lookup returns the first match) and unpoison() restores it;
+# otherwise a new entry is appended and unpoison() retires it.
+var _pz_old = 0;
+var _pz_new = 0;
 fn poison(key): i64 {
+    var i = 0;
+    while (i < _gpu_cn) {
+        if (load64(&_gpu_ck + i * 8) == key) {
+            _pz_old = load64(&_gpu_cv + i * 8); _pz_new = 0;
+            store64(&_gpu_cv + i * 8, 0 - 1);
+            return i;
+        }
+        i = i + 1;
+    }
+    _pz_new = 1;
     var slot = _gpu_cn;
     _gpu_cache_put(key, 0 - 1);
     return slot;
 }
 
 fn unpoison(slot): i64 {
+    if (_pz_new == 0) { store64(&_gpu_cv + slot * 8, _pz_old); return 0; }
     store64(&_gpu_ck + slot * 8, 0x7FFFFFFFFFFFFFFF);   # a key no getter builds
     return 0;
 }
@@ -166,6 +181,129 @@ fn attn_case(name, T, C, nh, must_run): i64 {
     return 0;
 }
 
+# ---- attention backward: attn11's tests/gpu_attn_bwd.cyr reference, ported ----
+# frand / fill_pc / cpu_attn_bwd are attn11's (cpu_attn_bwd is identical to its
+# src/attn.cyr attn_core_bwd: causal MHA, gsz = 1, Ckv = C, kvb = base = h·hd).
+fn frand(i, seed): i64 {
+    var x = ((i * 2654435761) + (seed * 40503)) % 1000;
+    if (x < 0) { x = x + 1000; }
+    return f64_div(f64_from(x - 500), f64_from(100));
+}
+
+# Pc(nh,T,T) = a causal softmax of random scores (j > i = 0), as the forward would leave it.
+fn fill_pc(Pc, T, nh): i64 {
+    var h = 0;
+    while (h < nh) {
+        var i = 0;
+        while (i < T) {
+            var prow = Pc + (h * T + i) * T * 8;
+            var j = 0;
+            while (j < T) { store64(prow + j * 8, f64_from(0)); j = j + 1; }
+            var mx = frand(h * T * T + i * T, 11);
+            j = 0;
+            while (j <= i) {
+                var s = frand((h * T + i) * T + j, 11);
+                store64(prow + j * 8, s); if (f64_gt(s, mx) == 1) { mx = s; } j = j + 1;
+            }
+            var sum = f64_from(0);
+            j = 0;
+            while (j <= i) {
+                var e = f64_exp(f64_sub(load64(prow + j * 8), mx));
+                store64(prow + j * 8, e); sum = f64_add(sum, e); j = j + 1;
+            }
+            var inv = f64_div(f64_from(1), sum);
+            j = 0;
+            while (j <= i) { store64(prow + j * 8, f64_mul(load64(prow + j * 8), inv)); j = j + 1; }
+            i = i + 1;
+        }
+        h = h + 1;
+    }
+    return 0;
+}
+
+fn cpu_attn_bwd(Qc, Kc, Vc, Pc, dconcat, dQ, dK, dV, dprow, T, C, nh): i64 {
+    var hd = C / nh; var Ckv = C; var scale = f64_div(f64_from(1), f64_sqrt(f64_from(hd)));
+    var i0 = 0;
+    while (i0 < T * C) {
+        store64(dQ + i0 * 8, f64_from(0)); store64(dK + i0 * 8, f64_from(0)); store64(dV + i0 * 8, f64_from(0));
+        i0 = i0 + 1;
+    }
+    var h = 0;
+    while (h < nh) {
+        var base = h * hd;
+        var i = 0;
+        while (i < T) {
+            var prow = Pc + (h * T + i) * T * 8; var dcbase = dconcat + (i * C + base) * 8; var jhi = i;
+            var j = 0;
+            while (j <= jhi) {
+                var pij = load64(prow + j * 8);
+                var vbase = Vc + (j * Ckv + base) * 8; var dvbase = dV + (j * Ckv + base) * 8;
+                var dpj = f64_from(0); var d = 0;
+                while (d < hd) {
+                    var dc = load64(dcbase + d * 8);
+                    dpj = f64_add(dpj, f64_mul(dc, load64(vbase + d * 8)));
+                    store64(dvbase + d * 8, f64_add(load64(dvbase + d * 8), f64_mul(pij, dc)));
+                    d = d + 1;
+                }
+                store64(dprow + j * 8, dpj); j = j + 1;
+            }
+            var dotPdP = f64_from(0);
+            j = 0;
+            while (j <= jhi) {
+                dotPdP = f64_add(dotPdP, f64_mul(load64(prow + j * 8), load64(dprow + j * 8)));
+                j = j + 1;
+            }
+            var dqbase = dQ + (i * C + base) * 8; var qbase2 = Qc + (i * C + base) * 8;
+            j = 0;
+            while (j <= jhi) {
+                var ds = f64_mul(load64(prow + j * 8), f64_sub(load64(dprow + j * 8), dotPdP));
+                var sds = f64_mul(scale, ds);
+                var kbase = Kc + (j * Ckv + base) * 8; var dkbase = dK + (j * Ckv + base) * 8; var d = 0;
+                while (d < hd) {
+                    store64(dqbase + d * 8, f64_add(load64(dqbase + d * 8), f64_mul(sds, load64(kbase + d * 8))));
+                    store64(dkbase + d * 8, f64_add(load64(dkbase + d * 8), f64_mul(sds, load64(qbase2 + d * 8))));
+                    d = d + 1;
+                }
+                j = j + 1;
+            }
+            i = i + 1;
+        }
+        h = h + 1;
+    }
+    return 0;
+}
+
+# 1 if every |a - b| <= 1e-9 + 1e-9·|b| (attn11's backward band: the Jacobian cancels).
+fn allclose9(a, b, n): i64 {
+    var tol = f64_div(f64_from(1), f64_from(1000000000));
+    var i = 0;
+    while (i < n) {
+        var r = load64(b + i * 8);
+        var err = f64_abs(f64_sub(load64(a + i * 8), r));
+        if (f64_gt(err, f64_add(tol, f64_mul(tol, f64_abs(r)))) == 1) { return 0; }
+        i = i + 1;
+    }
+    return 1;
+}
+
+fn attn_bwd_case(name, T, C, nh): i64 {
+    var tc = T * C;
+    var Q = t_alloc(tc); var Kc = t_alloc(tc); var V = t_alloc(tc); var dc = t_alloc(tc);
+    var P = t_alloc(nh * T * T);
+    var i = 0;
+    while (i < tc) {
+        store64(Q + i * 8, frand(i, 1)); store64(Kc + i * 8, frand(i, 2));
+        store64(V + i * 8, frand(i, 3)); store64(dc + i * 8, frand(i, 4)); i = i + 1;
+    }
+    fill_pc(P, T, nh);
+    var rQ = t_alloc(tc); var rK = t_alloc(tc); var rV = t_alloc(tc); var dpr = t_alloc(T);
+    cpu_attn_bwd(Q, Kc, V, P, dc, rQ, rK, rV, dpr, T, C, nh);
+    var gQ = t_alloc(tc); var gK = t_alloc(tc); var gV = t_alloc(tc);
+    assert(gpu_attn_core_bwd(Q, Kc, V, P, dc, gQ, gK, gV, dpr, T, C, nh, nh) == 0, name);
+    assert((allclose9(gQ, rQ, tc) & allclose9(gK, rK, tc) & allclose9(gV, rV, tc)) == 1, name);
+    return 0;
+}
+
 fn main() {
     alloc_init();
     if (_gpu_init() == 0) {
@@ -197,13 +335,26 @@ fn main() {
     attn_case("attn T=16 C=32 nh=8 (hd 4)", 16, 32, 8, 1);
     attn_case("attn T=16 C=32 nh=4 (hd 8) after nh=8", 16, 32, 4, 1);
     attn_case("attn T=16 C=32 nh=8 again", 16, 32, 8, 1);
-    # hd 16: the untiled scores kernel exceeds mabda's id cap on cyrius 6.7.18
-    # (forward compiles to hd 11) — it must fall back cleanly, or match if it runs
-    attn_case("attn T=16 C=64 nh=4 (hd 16): run or clean fallback", 16, 64, 4, 0);
+
+    test_group("attention at real head sizes (1.4.0: tiled over hd)");
+    # 1.3.0 fell back above hd 11 (forward) / 17 (backward): the untiled kernels
+    # exceeded mabda's id cap. Tiled, every one of these must run on the device.
+    attn_case("attn fwd hd 16", 16, 64, 4, 1);
+    attn_case("attn fwd hd 32", 16, 64, 2, 1);
+    attn_case("attn fwd hd 64", 16, 128, 2, 1);
+    attn_case("attn fwd hd 12 (a short last tile)", 16, 48, 4, 1);
+    attn_case("attn fwd GPT-2 small: T=64 C=768 nh=12 (hd 64)", 64, 768, 12, 1);
+    attn_bwd_case("attn bwd hd 8", 16, 32, 4);
+    attn_bwd_case("attn bwd hd 16", 16, 64, 4);
+    attn_bwd_case("attn bwd hd 32", 16, 64, 2);
+    attn_bwd_case("attn bwd hd 64", 16, 64, 1);
+    attn_bwd_case("attn bwd hd 20, T=20 (short tiles in hd and T)", 20, 40, 2);
+    attn_bwd_case("attn bwd GPT-2 small: T=64 C=768 nh=12 (hd 64)", 64, 768, 12);
     # guards that fall back before touching anything
     var gq = t_alloc(16 * 128); var go = t_alloc(16 * 128); var gp = t_alloc(2 * 16 * 16);
     sentinel(go, 16 * 128);
-    assert(gpu_attn_core(gq, gq, gq, gp, go, 16, 128, 2, 2) != 0, "attn hd = 64 > 32 falls back");
+    assert(gpu_attn_core(gq, gq, gq, gp, go, 16, 128, 1, 1) != 0,
+      "attn hd = 128 (past the key's hd field) falls back");
     assert(gpu_attn_core(gq, gq, gq, gp, go, 16, 100, 8, 8) != 0, "attn C % nh != 0 falls back");
     assert(untouched(go, 16 * 128) == 1, "... with concat untouched");
 

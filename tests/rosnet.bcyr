@@ -178,6 +178,14 @@ fn bench_conv2d(): i64 {
     }
     bench_batch_stop(bh2, 10);
     bench_report(bh2);
+    # the same layer at stride 2 (a downsampling conv): SW > 1 takes its own path
+    var y2 = t_alloc(N * Cout * 14 * 14);
+    var bh3 = bench_new("conv2d_fwd stride 2 (8x8x28x28 -> 8, 3x3, pad 1)");
+    bench_batch_start(bh3);
+    i = 0;
+    while (i < 10) { conv2d_fwd(x, Wf, b, y2, N, Cin, H, W, Cout, K, K, 2, 2, 1, 1); i = i + 1; }
+    bench_batch_stop(bh3, 10);
+    bench_report(bh3);
     return 0;
 }
 

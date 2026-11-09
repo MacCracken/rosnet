@@ -4,6 +4,62 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-09
+
+GPU attention at real head sizes. No API change. Every CPU result is
+byte-identical to 1.3.0 (the 15,302-line golden dump), and every GPU kernel that
+1.3.0 could compile gives the same bits on the device.
+
+### Changed
+
+- **GPU attention runs at real head sizes.** The forward scores kernel and the
+  backward dp kernel each unrolled the whole head dimension into one shader.
+  mabda's 256-id cap refuses that above hd 11 (forward) and hd 17 (backward) on
+  cyrius 6.7.18. So `gpu_attn_core` and `gpu_attn_core_bwd` fell back to the
+  CPU for GPT-2's hd 64, and even for hd 16. Both kernels now run in tiles of 8
+  over the head dimension, accumulating the dot product in P (or dP) in d
+  order; the last scores tile applies the scale and the causal mask. On a GFX9
+  device the GPU results match the CPU references (1e-10 forward, 1e-9
+  backward) at hd 16, 32 and 64, and at GPT-2 small (T=64, C=768, nh=12).
+- **Same bits where 1.3.0 already ran.** Each tile reloads the stored partial
+  sum and keeps adding, so every product and sum rounds as it would in one
+  pass. A device dump of forward (hd 8–11) and backward (hd 9–17) outputs,
+  15,438 lines, is bit-identical between 1.3.0's untiled kernels and 1.4.0's
+  tiled ones. The untiled builders are now wrappers (`d0 = 0, td = hd`) and
+  emit the same SPIR-V byte for byte, so the 18,167-line builder dump is
+  unchanged.
+- **The head-dim cap of 32 is gone** from both attention entries. The
+  shader-cache key's 7-bit hd field is now the bound: hd below 128 runs on the
+  device, 128 or more falls back to the CPU. The dp kernel's key now includes
+  the tile start.
+
+### Consumer note — attn11's backward test
+
+attn11's `tests/gpu_attn_bwd.cyr` asserts that hd 32 and hd 64 fall back to
+the CPU (`expect_fb`). Against 1.4.0 they run on the device, so those two checks
+report "UNEXPECTED on-device"; every `run_shape` check still passes. Changing
+the two lines to `run_shape(16, 64, 2, …)` and `run_shape(16, 64, 1, …)` makes
+the whole suite pass. This was checked in a scratch copy; attn11 itself is
+unchanged.
+
+### Added
+
+- Device tests 39 → 60 assertions: forward and backward at hd 12, 16, 20, 32
+  and 64 and at GPT-2 small, plus the hd 128 fallback. attn11's backward
+  reference is ported. Host tests 71 → 80: every tiled builder fits
+  `spv[8192]` at hd 127.
+- A `conv2d_fwd stride 2` benchmark row.
+
+### Measured, not adopted (see the roadmap)
+
+- **A strided-conv fast path:** the stride-1 row kernel with a gather. It was
+  bit-identical, but ~10% faster at stride 2 and ~7% slower at stride 3.
+  `src/conv.cyr` is unchanged from 1.3.0.
+- **An AVX2 `linear_fwd`:** bit-identical and ~9.5% faster at 64×768×768 (11.0
+  vs 12.1 ms). It adds the `simd` stdlib leaf to the CPU sidecar, and no
+  consumer declares it today. Not in 1.4.0; the decision since is to adopt it
+  as 1.4.1 (see the roadmap).
+
 ## [1.3.0] - 2026-11-09
 
 Closes the 1.2.2 sweep's open ends ([`roadmap.md`](docs/development/roadmap.md)).

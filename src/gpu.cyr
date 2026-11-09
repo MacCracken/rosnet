@@ -1613,17 +1613,27 @@ fn gpu_ln_bwd(x, gamma, dy, mean, rstd, dx, dgamma, dbeta, M, C): i64 {
 # 6 dispatches / 5 kernels (E,F share the gather kernel). The forward zeroed Pc's upper triangle
 # (Pc[h,i,j]=0 for j>i), so every reduction/gather loops the FULL range UNMASKED — j>i / i<j terms
 # zero out. (1.8.10 was untiled over T and gated T ≤ 32; 1.9.0 tiled the T loops — see
-# gpu_attn_core_bwd — so that gate is gone; hd ≤ 32 gates the one untiled pass.) MHA only
+# gpu_attn_core_bwd — so that gate is gone; rosnet 1.4.0 tiled pass A over hd too.) MHA only
 # (nkv==nh, C % nh == 0 → base=kvb=h·hd, Ckv=C); caller gates g_bidir.
 # See attn11's docs/architecture/011-gpu-attention.md.
 # ===========================================================================
 
 # A dP[h,i,j] = Σ_d dconcat[i,base+d]·V[j,base+d]. dc=0(%12) V=1(%13) dP=2(%14). grid nh·T·T.
+# The untiled kernel: one pass over all hd (compiles only for small hd — see _gpu_build_abwd_dp_t).
 fn _gpu_build_abwd_dp(buf, T, C, hd): i64 {
+    return _gpu_build_abwd_dp_t(buf, T, C, hd, 0, hd);
+}
+
+# dP over one hd tile [d0, d0 + td) (1.4.0): the tiles run in d order and accumulate in dP —
+# the first starts from its first product, a later one reloads dP[idx] and keeps adding. Same
+# roundings as one untiled pass; with d0 = 0, td = hd it emits the untiled kernel byte for byte.
+fn _gpu_build_abwd_dp_t(buf, T, C, hd, d0, td): i64 {
     var o = _gpu_pre(buf, 3, 21);
     o=_gpu_op4(buf,o,0x0004002B,3,15,0); o=_gpu_op4(buf,o,0x0004002B,3,16,T);
     o=_gpu_op4(buf,o,0x0004002B,3,17,C); o=_gpu_op4(buf,o,0x0004002B,3,18,hd);
     o=_gpu_op4(buf,o,0x0004002B,3,19,T*T); o=_gpu_op4(buf,o,0x0004002B,3,20,1);
+    var nid=36;
+    if (d0 != 0) { o=_gpu_op4(buf,o,0x0004002B,3,36,d0); nid=37; }   # %36 = d0
     o=_gpu_op5(buf,o,0x00050036,1,21,0,2); o=_gpu_op2(buf,o,0x000200F8,22);
     o=_gpu_op4(buf,o,0x0004003D,4,23,11); o=_gpu_op5(buf,o,0x00050051,3,24,23,0);
     o=_gpu_op5(buf,o,0x00050086,3,25,24,19);                       # h = idx/TT
@@ -1633,13 +1643,19 @@ fn _gpu_build_abwd_dp(buf, T, C, hd): i64 {
     o=_gpu_op5(buf,o,0x00050084,3,31,25,18);                       # hhd = base
     o=_gpu_op5(buf,o,0x00050084,3,32,28,17); o=_gpu_op5(buf,o,0x00050080,3,33,32,31);   # dcb = i*C+base
     o=_gpu_op5(buf,o,0x00050084,3,34,30,17); o=_gpu_op5(buf,o,0x00050080,3,35,34,31);   # vb = j*C+base
-    var di=33; var vi=35; var nid=36; var acc=0; var d=0;
-    while (d < hd) {
+    var di=33; var vi=35; var acc=0; var d=0;
+    if (d0 != 0) {
+        var dd=nid; nid=nid+1; o=_gpu_op5(buf,o,0x00050080,3,dd,di,36); di=dd;     # dconcat index + d0
+        var vd=nid; nid=nid+1; o=_gpu_op5(buf,o,0x00050080,3,vd,vi,36); vi=vd;     # V index + d0
+        var p0=nid; var pv0=nid+1; o=_gpu_acl6(buf,o,p0,pv0,14,15,24); nid=nid+2;  # the partial so far
+        acc=pv0;
+    }
+    while (d < td) {
         var dp=nid; var dv=nid+1; o=_gpu_acl6(buf,o,dp,dv,12,15,di); nid=nid+2;
         var vp=nid; var vv=nid+1; o=_gpu_acl6(buf,o,vp,vv,13,15,vi); nid=nid+2;
         var pr=nid; nid=nid+1; o=_gpu_op5(buf,o,0x00050085,6,pr,dv,vv);
-        if (d==0) { acc=pr; } else { var an=nid; nid=nid+1; o=_gpu_op5(buf,o,0x00050081,6,an,acc,pr); acc=an; }
-        if (d<hd-1) {
+        if (acc==0) { acc=pr; } else { var an=nid; nid=nid+1; o=_gpu_op5(buf,o,0x00050081,6,an,acc,pr); acc=an; }
+        if (d<td-1) {
             var dn=nid;
             nid=nid+1;
             o=_gpu_op5(buf,o,0x00050080,3,dn,di,20);
@@ -1792,15 +1808,20 @@ fn _gpu_build_abwd_gather_t(buf, T, C, hd, t0, tk): i64 {
     o=_gpu_op2(buf,o,0x000100FD,0x00010038); store32(buf+12,nid); return o;
 }
 
-# Non-tiled abwd kernels (dp loops hd, sds is elementwise — neither loops T, so both fit the cap).
-# hd is in the key: the dp kernel (kind 16) BAKES hd (dot length + per-head base) into its SPIR-V, so
-# two shapes sharing (C,T) but differing in nh (→ hd=C/nh) must not collide on a stale cached shader.
-fn _gpu_get_abwd(kind, T, C, hd, scale): i64 {
-    if ((_gpu_kfit(hd, 28) & _gpu_kfit(C, 14) & _gpu_kfit(T, 14)) == 0) { return 0; }   # key fields must fit
-    var key = (kind << 56) | (hd << 28) | (C << 14) | T;
+# abwd kernels that do not loop T: dp (kind 16, tiled over hd since 1.4.0 — d0 is the tile)
+# and sds (kind 18, elementwise; d0 = 0). hd is in the key: the dp kernel BAKES hd (dot length +
+# per-head base) into its SPIR-V, so two shapes sharing (C,T) but differing in nh (→ hd=C/nh) must
+# not collide on a stale cached shader. With d0 = 0 the key is the 1.3.0 key.
+fn _gpu_get_abwd(kind, T, C, hd, scale, d0): i64 {
+    if ((_gpu_kfit(hd, 7) & _gpu_kfit(d0, 7) & _gpu_kfit(C, 14) & _gpu_kfit(T, 14)) == 0) { return 0; }
+    var key = (kind << 56) | (d0 << 35) | (hd << 28) | (C << 14) | T;
     var c = _gpu_cache_get(key); if (c == (0 - 1)) { return 0; } if (c != 0) { return c; }
     var spv[8192]; var nb = 0;
-    if (kind == 16) { nb = _gpu_build_abwd_dp(&spv, T, C, hd); }
+    if (kind == 16) {
+        var td = hd - d0;
+        if (td > _GPU_ATTN_TD()) { td = _GPU_ATTN_TD(); }
+        nb = _gpu_build_abwd_dp_t(&spv, T, C, hd, d0, td);
+    }
     else { nb = _gpu_build_abwd_sds(&spv, T, scale); }
     var sh = gpu_shader_module_create_spirv(_gpu_ctx, &spv, nb);
     if (sh == 0) { _gpu_cache_put(key, 0 - 1); return 0; }
@@ -1851,8 +1872,8 @@ fn gpu_attn_core_bwd(Qc, Kc, Vc, Pc, dconcat, dQ, dK, dV, dprow, T, C, nh, nkv):
     # C = 100, nh = 8 the kernels read K/V at stride C and wrote T·C into dK/dV sized T·96
     var hd = C / nh; var Ckv = C;
     if (hd <= 0) { return 0 - 1; }
-    if (hd > 32) { return 0 - 1; }              # pass A (dp) is UNTILED — unrolls hd into spv[8192];
-    # hd>32 would overflow the build buffer → CPU (never a crash)
+    # pass A (dp) is tiled over hd (1.4.0), so its kernels fit spv[8192] at any hd; the
+    # key's 7-bit hd field bounds hd below 128 (1.2.2–1.3.0 capped hd at 32).
     var TK = 16;
     var PN = nh * T * T;
     if ((PN * 8) > GPU_BO_MAX()) { return 0 - 1; }
@@ -1862,12 +1883,17 @@ fn gpu_attn_core_bwd(Qc, Kc, Vc, Pc, dconcat, dQ, dK, dV, dprow, T, C, nh, nkv):
     var scale = f64_div(f64_from(1), f64_sqrt(f64_from(hd)));
     var tc = T * C;
     var i = 0;
-    # ---- A: dP = Σ_d dconcat·V → y (untiled, loops hd). (dconcat→x, V→W) ----
+    # ---- A: dP = Σ_d dconcat·V → y (TILED over hd since 1.4.0: each tile reloads the partial
+    #      and keeps adding, so the sum rounds as one pass). (dconcat→x, V→W) ----
     while (i < tc) { store64(_gpu_xm + i*8, load64(dconcat + i*8)); i = i + 1; }
     i = 0; while (i < tc) { store64(_gpu_wm + i*8, load64(Vc + i*8)); i = i + 1; }
-    var sa = _gpu_get_abwd(16, T, C, hd, scale);
-    if (sa == 0) { return 0 - 1; }
-    if (_gpu_abwd_disp(sa, _gpu_xh,_GPU_XVA(), _gpu_wh,_GPU_WVA(), _gpu_yh,_GPU_YVA(), PN) != 0) { return 0 - 1; }
+    var d0 = 0;
+    while (d0 < hd) {
+        var sa = _gpu_get_abwd(16, T, C, hd, scale, d0);
+        if (sa == 0) { return 0 - 1; }
+        if (_gpu_abwd_disp(sa, _gpu_xh,_GPU_XVA(), _gpu_wh,_GPU_WVA(), _gpu_yh,_GPU_YVA(), PN) != 0) { return 0 - 1; }
+        d0 = d0 + _GPU_ATTN_TD();
+    }
     # ---- B: dotPdP = Σ_j P·dP → beta (TILED over j, RMW). (P→x, dP in y) ----
     i = 0; while (i < PN) { store64(_gpu_xm + i*8, load64(Pc + i*8)); i = i + 1; }
     i = 0; while (i < nh*T) { store64(_gpu_bbm + i*8, f64_from(0)); i = i + 1; }
@@ -1881,7 +1907,7 @@ fn gpu_attn_core_bwd(Qc, Kc, Vc, Pc, dconcat, dQ, dK, dV, dprow, T, C, nh, nkv):
         t0 = t0 + tkb;
     }
     # ---- C: sds = scale·P·(dP − dotPdP) → y (in-place, elementwise). (P in x, dPsds in y, dotPdP in beta) ----
-    var sc = _gpu_get_abwd(18, T, C, hd, scale);
+    var sc = _gpu_get_abwd(18, T, C, hd, scale, 0);
     if (sc == 0) { return 0 - 1; }
     if (_gpu_abwd_disp(sc, _gpu_xh,_GPU_XVA(), _gpu_yh,_GPU_YVA(), _gpu_bbh,_GPU_BVA(), PN) != 0) { return 0 - 1; }
     # ---- D: dQ = Σ_j sds·K → gamma (TILED over j, RMW). (sds in y, K→W) ----
@@ -1966,13 +1992,31 @@ fn _gpu_pre_a(buf, nbind, fnid): i64 {
 }
 
 # P1 scores: Q=0 K=1 P=2. P[h,i,j] = (j<=i) ? scale·Σ_d q·k : -1e8. grid nh*T*T.
+# The untiled kernel: one pass over all hd (compiles only for small hd — see _gpu_attn_scores_t).
 fn _gpu_attn_scores(buf, T, C, hd, Ckv, scale): i64 {
+    return _gpu_attn_scores_t(buf, T, C, hd, Ckv, scale, 0, hd);
+}
+
+# The hd tile width for the untiled-over-hd attention kernels (scores fwd, dp bwd).
+# A kernel unrolls its tile, and mabda's 256-id cap (which must also hold the values its
+# compiler synthesizes) refuses an unroll past ~11 (scores) / ~17 (dp) on cyrius 6.7.18,
+# so 8 compiles for both with room to spare (1.4.0).
+fn _GPU_ATTN_TD(): i64 { return 8; }
+
+# P1 scores over one hd tile [d0, d0 + td) (1.4.0). The tiles of one call run in d order
+# and accumulate the dot in P: the first starts from its first product (as one untiled pass
+# does), a later one reloads P[idx] and keeps adding, and only the last applies scale and
+# the causal select. Each product and sum rounds exactly as in the untiled pass (the
+# partial is stored as an f64, exactly), so tiling changes no bits — and with d0 = 0,
+# td = hd this emits the untiled kernel byte for byte.
+fn _gpu_attn_scores_t(buf, T, C, hd, Ckv, scale, d0, td): i64 {
     var o = _gpu_pre_a(buf, 3, 30);
     o = _gpu_op4(buf, o, 0x0004002B, 4, 18, 0); o = _gpu_op4(buf, o, 0x0004002B, 4, 19, T);
     o = _gpu_op4(buf, o, 0x0004002B, 4, 20, C); o = _gpu_op4(buf, o, 0x0004002B, 4, 21, hd);
     o = _gpu_op4(buf, o, 0x0004002B, 4, 22, Ckv); o = _gpu_op4(buf, o, 0x0004002B, 4, 23, T*T);
     o = _gpu_ecf(buf, o, 24, scale); o = _gpu_ecf(buf, o, 25, 0xC197D78400000000);    # -1e8 (causal sentinel)
     o = _gpu_op4(buf, o, 0x0004002B, 4, 26, 1);
+    if (d0 != 0) { o = _gpu_op4(buf, o, 0x0004002B, 4, 27, d0); }   # %27 = d0 (a free id)
     o = _gpu_op5(buf, o, 0x00050036, 2, 30, 0, 3); o = _gpu_op2(buf, o, 0x000200F8, 31);
     o = _gpu_op4(buf, o, 0x0004003D, 5, 32, 14);
     o = _gpu_op5(buf, o, 0x00050051, 4, 33, 32, 0);
@@ -1982,19 +2026,31 @@ fn _gpu_attn_scores(buf, T, C, hd, Ckv, scale): i64 {
     o = _gpu_op5(buf, o, 0x00050084, 4, 39, 36, 20); o = _gpu_op5(buf, o, 0x00050080, 4, 40, 39, 38);
     o = _gpu_op5(buf, o, 0x00050084, 4, 41, 37, 22); o = _gpu_op5(buf, o, 0x00050080, 4, 42, 41, 38);
     var qi = 40; var ki = 42; var nid = 43; var acc = 0; var d = 0;
-    while (d < hd) {
+    if (d0 != 0) {
+        var qd=nid; nid=nid+1; o = _gpu_op5(buf, o, 0x00050080, 4, qd, qi, 27); qi=qd;   # q index + d0
+        var kd=nid; nid=nid+1; o = _gpu_op5(buf, o, 0x00050080, 4, kd, ki, 27); ki=kd;   # k index + d0
+        var p0=nid; nid=nid+1; o = _gpu_op6(buf, o, 0x00060041, 11, p0, 17, 18, 33);
+        var pv0=nid; nid=nid+1; o = _gpu_op4(buf, o, 0x0004003D, 7, pv0, p0);          # the partial so far
+        acc = pv0;
+    }
+    while (d < td) {
         var qp = nid; nid=nid+1; o = _gpu_op6(buf, o, 0x00060041, 11, qp, 15, 18, qi);
         var qv = nid; nid=nid+1; o = _gpu_op4(buf, o, 0x0004003D, 7, qv, qp);
         var kp = nid; nid=nid+1; o = _gpu_op6(buf, o, 0x00060041, 11, kp, 16, 18, ki);
         var kvv = nid; nid=nid+1; o = _gpu_op4(buf, o, 0x0004003D, 7, kvv, kp);
         var pr = nid; nid=nid+1; o = _gpu_op5(buf, o, 0x00050085, 7, pr, qv, kvv);
-        if (d == 0) { acc = pr; }
+        if (acc == 0) { acc = pr; }
         else { var an=nid; nid=nid+1; o = _gpu_op5(buf, o, 0x00050081, 7, an, acc, pr); acc=an; }
-        if (d < hd-1) {
+        if (d < td-1) {
             var qn=nid; nid=nid+1; o = _gpu_op5(buf, o, 0x00050080, 4, qn, qi, 26); qi=qn;
             var kn=nid; nid=nid+1; o = _gpu_op5(buf, o, 0x00050080, 4, kn, ki, 26); ki=kn;
         }
         d = d + 1;
+    }
+    if ((d0 + td) < hd) {                                    # not the last tile: store the partial
+        var ps=nid; nid=nid+1; o = _gpu_op6(buf, o, 0x00060041, 11, ps, 17, 18, 33);
+        o = _gpu_op3(buf, o, 0x0003003E, ps, acc);
+        o = _gpu_op2(buf, o, 0x000100FD, 0x00010038); store32(buf+12, nid); return o;
     }
     var scl=nid; nid=nid+1; o = _gpu_op5(buf, o, 0x00050085, 7, scl, acc, 24);
     var ic=nid; nid=nid+1; o = _gpu_op4(buf, o, 0x0004006F, 7, ic, 36);
@@ -2133,7 +2189,11 @@ fn _gpu_get_attn(kind, T, C, hd, Ckv, scale, k0, TK): i64 {
     if (c != 0) { return c; }
     var spv[8192];
     var nbytes = 0;
-    if (kind == 6) { nbytes = _gpu_attn_scores(&spv, T, C, hd, Ckv, scale); }
+    if (kind == 6) {                                         # k0 is the hd tile start d0 here
+        var td = hd - k0;
+        if (td > _GPU_ATTN_TD()) { td = _GPU_ATTN_TD(); }
+        nbytes = _gpu_attn_scores_t(&spv, T, C, hd, Ckv, scale, k0, td);
+    }
     elif (kind == 7) { nbytes = _gpu_attn_rowmax(&spv, T, k0, TK); }
     elif (kind == 8) { nbytes = _gpu_attn_expsum(&spv, T, k0, TK); }
     else { nbytes = _gpu_attn_pv(&spv, T, C, hd, Ckv, k0, TK); }
@@ -2167,12 +2227,9 @@ fn gpu_attn_core(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
     if ((C % nh) != 0) { return 0 - 1; }        # hd·nh must be C: Ckv = C, and the key relies on it
     var hd = C / nh;
     if (hd <= 0) { return 0 - 1; }
-    # P1 (scores) is UNTILED over hd: it unrolls hd into spv[8192] at 160 B per unit
-    # (11,172 B at hd = 64). hd > 32 overflowed that stack buffer before 1.2.2 → CPU.
-    # (mabda already refuses the kernel above hd 11 on cyrius 6.7.18 — its 256-id cap
-    # must also hold the values it synthesizes; this keeps the build from writing past
-    # the buffer first, whatever mabda's cap becomes.)
-    if (hd > 32) { return 0 - 1; }
+    # P1 (scores) is tiled over hd (1.4.0), so each kernel unrolls at most _GPU_ATTN_TD()
+    # products and fits spv[8192] at any hd (1.2.2 capped hd at 32 because the untiled
+    # kernel wrote 11,172 B at hd = 64). The key's 7-bit hd field bounds hd below 128.
     var Ckv = nkv * hd;
     var TK = _GPU_ATTN_TK();
     if ((T % TK) != 0) { return 0 - 1; }
@@ -2193,11 +2250,16 @@ fn gpu_attn_core(Qc, Kc, Vc, Pc, concat, T, C, nh, nkv): i64 {
     var MT = nh * T;
     i = 0; while (i < MT) { store64(_gpu_sm + i*8, neg); store64(_gpu_vm + i*8, f64_from(0)); i = i + 1; }
     i = 0; var on = T * C; while (i < on) { store64(_gpu_ym + i*8, f64_from(0)); i = i + 1; }
-    # P1 scores → P (beta buffer)
-    var sh = _gpu_get_attn(6, T, C, hd, Ckv, scale, 0, TK);
-    if (sh == 0) { return 0 - 1; }
-    if (_gpu_attn_disp(sh, 3, _gpu_xh, _GPU_XVA(), _gpu_wh, _GPU_WVA(), _gpu_bbh, _GPU_BVA(), PN) != 0) {
-        return 0 - 1;
+    # P1 scores → P (beta buffer), TILED over hd since 1.4.0 (the tiles accumulate in P in d
+    # order; the last applies scale + the causal select — same bits as one untiled pass)
+    var d0 = 0;
+    while (d0 < hd) {
+        var sh = _gpu_get_attn(6, T, C, hd, Ckv, scale, d0, TK);
+        if (sh == 0) { return 0 - 1; }
+        if (_gpu_attn_disp(sh, 3, _gpu_xh, _GPU_XVA(), _gpu_wh, _GPU_WVA(), _gpu_bbh, _GPU_BVA(), PN) != 0) {
+            return 0 - 1;
+        }
+        d0 = d0 + _GPU_ATTN_TD();
     }
     # P2 rowmax tiles → M (S)
     var k0 = 0;

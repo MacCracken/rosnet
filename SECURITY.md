@@ -52,9 +52,9 @@ buffers. What the GPU path adds is host-side state of its own — the fixed GTT
 pool, the shader cache, the SPIR-V build buffers — and every entry point guards
 those before touching them: each dim positive, every upload within its 4 MB
 buffer object, every grid within mabda's dispatch cap, every shader-cache key
-field in range, and the untiled attention builders capped at head dim 32 so a
-shader fits its build buffer (before 1.2.2 the forward attention path had no
-such cap and overran a stack buffer at head dim 64). Anything outside those
+field in range, and every shader builder bounded so it fits its build buffer
+(the attention kernels are tiled over the head dim since 1.4.0; before 1.2.2 the
+untiled forward builder overran a stack buffer at head dim 64). Anything outside those
 bounds falls back to the CPU op, leaving the caller's outputs untouched (since
 1.3.0), and a failing dispatch disables the GPU path for the rest of the
 process. This surface is **Linux/DRM-only** and absent

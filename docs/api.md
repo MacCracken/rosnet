@@ -81,9 +81,11 @@ consumer had to define). Every op **self-falls-back to CPU** (returns non-0)
 when the device is unavailable or the shape is outside what it handles: a
 non-positive dim; a dim off its tile multiple; a buffer past `GPU_BO_MAX()`; a
 grid past mabda's dispatch cap; a dim too large for its shader-cache key field;
-attention with `C % nh != 0` or a head dim over 32; or a kernel mabda refuses to
-compile (its 256-id cap — on cyrius 6.7.18 the untiled attention kernels compile
-only up to head dim 11 forward and 17 backward, so larger heads fall back today).
+attention with `C % nh != 0` or a head dim of 128 or more (the cache key's hd
+field); or a kernel mabda refuses to compile (its 256-id cap). Since 1.4.0 the
+attention kernels that unroll the head dim run in tiles of 8, so any head dim
+below 128 runs on the device — GPT-2's 64 included (1.2.2 – 1.3.0 fell back
+above 11 forward and 17 backward).
 A full shader cache is not a fallback: past 1024 cached kernels, new ones are
 compiled, dispatched once and released (1.3.0). The gates and counters make
 engagement observable, never assumed.

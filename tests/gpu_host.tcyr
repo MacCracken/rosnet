@@ -101,18 +101,25 @@ fn main() {
     clr(); fits("lnbwd_red TK=8", _gpu_build_lnbwd_red(BUF, 768, 0, 64, 8));
     clr(); fits("lnbwd_param TK=8", _gpu_build_lnbwd_param(BUF, 768, 0, 64, 8));
     clr(); fits("lnbwd_dx", _gpu_build_lnbwd_dx(BUF, 768, 64));
-    clr(); fits("abwd_dp hd=32", _gpu_build_abwd_dp(BUF, 64, 1024, 32));
+    # dp and scores are tiled over hd (1.4.0): the entries build at most _GPU_ATTN_TD()
+    # products per kernel, so check the worst tiles at the largest hd the key allows (127)
+    clr(); fits("abwd_dp tile d0=0 td=8, hd 127", _gpu_build_abwd_dp_t(BUF, 64, 1016, 127, 0, 8));
+    clr(); fits("abwd_dp tile d0=112 td=8, hd 127", _gpu_build_abwd_dp_t(BUF, 64, 1016, 127, 112, 8));
+    clr(); fits("abwd_dp last tile d0=120 td=7, hd 127", _gpu_build_abwd_dp_t(BUF, 64, 1016, 127, 120, 7));
     clr(); fits("abwd_sds", _gpu_build_abwd_sds(BUF, 64, sc));
     clr(); fits("abwd_dot_t tk=16", _gpu_build_abwd_dot_t(BUF, 64, 0, 16));
     clr(); fits("abwd_dq_t hd=32 tk=16", _gpu_build_abwd_dq_t(BUF, 64, 1024, 32, 0, 16));
     clr(); fits("abwd_gather_t hd=32 tk=16", _gpu_build_abwd_gather_t(BUF, 64, 1024, 32, 0, 16));
-    clr(); fits("attn_scores hd=32", _gpu_attn_scores(BUF, 64, 1024, 32, 1024, sc));
+    clr(); fits("attn_scores tile d0=0 td=8, hd 127", _gpu_attn_scores_t(BUF, 64, 1016, 127, 1016, sc, 0, 8));
+    clr(); fits("attn_scores tile d0=112 td=8, hd 127", _gpu_attn_scores_t(BUF, 64, 1016, 127, 1016, sc, 112, 8));
+    clr(); fits("attn_scores last tile d0=120 td=7, hd 127", _gpu_attn_scores_t(BUF, 64, 1016, 127, 1016, sc, 120, 7));
+    assert(_GPU_ATTN_TD() <= 8, "the hd tile stays at most 8 (what compiles under mabda's id cap)");
     clr(); fits("attn_rowmax TK", _gpu_attn_rowmax(BUF, 64, 0, _GPU_ATTN_TK()));
     clr(); fits("attn_expsum TK", _gpu_attn_expsum(BUF, 64, 0, _GPU_ATTN_TK()));
     clr(); fits("attn_pv hd=32 TK", _gpu_attn_pv(BUF, 64, 1024, 32, 1024, 0, _GPU_ATTN_TK()));
     clr(); fits("adam", _gpu_adam_k(BUF, 0));
     clr(); fits("rope", _gpu_build_rope(BUF, 768, 64, 32, 12, 1));
-    # the hazard the hd <= 32 guards exist for: the untiled builders outgrow the buffer
+    # why the hd loops are tiled (and why 1.2.2 capped hd at 32): untiled, they outgrow the buffer
     clr(); assert(_gpu_attn_scores(BUF, 64, 768, 64, 768, sc) > 8192, "scores at hd=64 would overflow spv[8192]");
     clr(); assert(_gpu_build_abwd_dp(BUF, 64, 768, 64) > 8192, "abwd_dp at hd=64 would overflow spv[8192]");
 

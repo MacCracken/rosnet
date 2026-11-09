@@ -96,3 +96,22 @@ table above, not across captures.
   consumer (attn11's GPU suite, bit-exact/~1e-13 parity vs this CPU path as the
   oracle); it has no standalone numbers here because the profile's contract is
   parity + dispatch, and device throughput is a mabda/provider property.
+
+## Since 1.2.2
+
+- **1.3.0 and 1.4.0 change no CPU kernel** (`src/tensor.cyr`, `src/linear.cyr`
+  and `src/conv.cyr` are byte-identical to 1.2.2). Their `bench-history.csv`
+  stamps differ from each other by a few percent across *every* row — including
+  `t_scale`, `t_copy` and `t_zero`, whose code did not change — which is host
+  drift between sessions, not a regression. Compare rows within one stamp, or
+  run an interleaved A/B against the older tree.
+- 1.4.0 adds a **`conv2d_fwd stride 2`** row (the same layer downsampling,
+  OH = OW = 14, 0.90 M MAC): 4.03 ms at the 1.3.0 stamp, ~0.22 G MAC/s. Strided
+  convs run the hoisted scalar loops, about a quarter of the stride-1 row
+  kernel's rate. A gather-based row kernel was measured and not adopted (~10%
+  faster at stride 2, ~7% slower at stride 3); see the roadmap.
+- **AVX2** was measured for `linear_fwd` (a 128-lane broadcast plus one
+  `f64v256_fmadd` per chunk — `vmulpd` + `vaddpd`, so the same bits): ~9.5%
+  faster at 64×768×768 (11.0 vs 12.1 ms, interleaved, same session). Scheduled
+  for 1.4.1 (it adds the `simd` stdlib leaf to the CPU sidecar); see the
+  roadmap.

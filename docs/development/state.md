@@ -5,6 +5,12 @@
 
 ## Version
 
+**1.4.0 — 2026-11-09 (GPU attention at real head sizes).** The forward scores
+and backward dp kernels run in hd tiles of 8, so attention runs on the device at
+any hd below 128 — GPT-2's 64 included (1.3.0 fell back above 11 / 17). Same
+bits wherever 1.3.0 already ran (device dump); CPU unchanged. No API change.
+attn11's backward test needs two `expect_fb` lines flipped (see the roadmap).
+
 **1.3.0 — 2026-11-09 (the 1.2.2 sweep's open ends).** GPU fixes validated on
 a GFX9 device (attn11's 12-test suite passes against this release); every GPU
 fallback leaves the caller's outputs untouched; a full shader cache is a soft
@@ -79,9 +85,9 @@ the CPU oracle in attn11's 12-test GPU suite. **0.1.1** — scaffolded
   `_gpu_dispatch` (sticky on failure); outputs read back after the last dispatch.
 - `src/main.cyr` — smoke demo (`main()` + `SYS_EXIT`; excluded from the bundle).
 
-CPU `[lib]` bundle → `dist/rosnet.cyr` (640 lines, v1.3.0; sidecar
+CPU `[lib]` bundle → `dist/rosnet.cyr` (640 lines, v1.4.0; sidecar
 `dist/rosnet.deps` = syscalls, string, fmt, alloc); GPU profile →
-`dist/rosnet-gpu.cyr` (2489 lines, v1.3.0; sidecar = mabda, math, result,
+`dist/rosnet-gpu.cyr` (2551 lines, v1.4.0; sidecar = mabda, math, result,
 ganita, syscalls, string). Regenerate with `cyrius distlib --all`; verify with
 `cyrius distlib --all --check`. Since 1.2.2 the GPU bundle needs no symbol from
 its consumer beyond mabda.
@@ -95,12 +101,13 @@ its consumer beyond mabda.
   **60/60** on aarch64 (qemu; the linear cases take the tolerance branch).
 - `tests/gpu_host.tcyr` — the GPU profile's host side, no device: cache
   capacity / full-cache behaviour, key fields, every SPIR-V builder within
-  `spv[8192]` at its guard limits, transient lifetime, sticky dispatch.
-  **71/71** (x86_64 and aarch64).
+  `spv[8192]` at its guard limits (the tiled attention builders at hd 127),
+  transient lifetime, sticky dispatch. **80/80** (x86_64 and aarch64).
 - `tests/gpu_device.tcyr` — the GPU ops on a real device (without one, e.g. on
   CI, 7 assertions of the no-device fallback contract instead):
   bit-exact matmul, the attention cache-key pair, untouched outputs on a
-  late-stage fallback, the soft cache cap. **39/39** on a Radeon Vega (GFX9).
+  late-stage fallback, the soft cache cap, forward / backward attention at hd
+  12–64 and GPT-2 small. **60/60** on a Radeon Vega (GFX9).
 - `tests/rosnet.fcyr` — seeded property fuzzer: 15,000 random shapes per run
   (±0 / subnormal / huge / ±Inf inputs) against the oracles; ~4 s.
 - `tests/rosnet.bcyr` — benchmarks (every BLAS-1 op, linear, conv2d, conv1d);
@@ -126,9 +133,10 @@ Direct (declared in `cyrius.cyml`):
 
 ## Next
 
-**1.4.x** — bit-preserving speed: GPU attention for real head sizes (tile the hd
-loop; today the forward compiles only to hd 11 and the backward dp to hd 17),
-an AVX2 path, a strided-conv fast path. Then demand-gated 1.x minors
-(wideners, quantized dtypes, numerical releases) and a 2.0.0 backlog of
-breaking changes nothing yet forces. Carried over: attn11's move to cyrius ≥
-6.6.19 (lands in attn11). See [`roadmap.md`](roadmap.md).
+**1.4.1** — the AVX2 path for `linear_fwd` / dW, decided and scheduled
+(bit-identical, ~9.5% faster; the `simd` leaf joins the CPU sidecar; tests cover
+both the AVX2 and the SSE2 path). Then demand-gated 1.x minors
+(wideners, quantized dtypes, numerical releases, strided conv via a different
+layout) and a 2.0.0 backlog nothing yet forces. Carried over to attn11: cyrius
+≥ 6.6.19, and two `expect_fb` lines → `run_shape` for rosnet ≥ 1.4.0. See
+[`roadmap.md`](roadmap.md).
